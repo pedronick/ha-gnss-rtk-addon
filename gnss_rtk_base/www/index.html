@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>RTK Base — Satelliti</title>
+<style>
+  body { background:#111318; color:#e8eaed; font-family: system-ui, sans-serif; margin:0; padding:16px; }
+  h1 { font-size:18px; font-weight:600; margin:0 0 12px; }
+  .header { display:flex; gap:24px; flex-wrap:wrap; margin-bottom:16px; }
+  .badge { padding:6px 12px; border-radius:8px; font-weight:600; font-size:14px; }
+  .badge.fix { background:#1e8e3e; }
+  .badge.float { background:#f9ab00; color:#111; }
+  .badge.single { background:#5f6368; }
+  .badge.nofix { background:#d93025; }
+  .stat { font-size:14px; color:#9aa0a6; }
+  .stat b { color:#e8eaed; font-size:16px; display:block; }
+  canvas { background:#1a1d24; border-radius:12px; display:block; margin:0 auto; }
+  .legend { display:flex; gap:16px; justify-content:center; margin-top:10px; font-size:13px; color:#9aa0a6; }
+  .legend span::before { content:"●"; margin-right:6px; }
+  .legend .used::before { color:#34a853; }
+  .legend .visible::before { color:#5f6368; }
+</style>
+</head>
+<body>
+  <h1>RTK Base — Satelliti e stato del fix</h1>
+  <div class="header">
+    <div><span id="fixBadge" class="badge nofix">—</span></div>
+    <div class="stat">Satelliti in uso<b id="numSv">—</b></div>
+    <div class="stat">Accuratezza stimata<b id="accuracy">—</b></div>
+    <div class="stat">HDOP / PDOP<b id="dop">—</b></div>
+  </div>
+  <canvas id="sky" width="480" height="480"></canvas>
+  <div class="legend">
+    <span class="used">Usato nel fix</span>
+    <span class="visible">Visibile, non usato</span>
+  </div>
+
+<script>
+const canvas = document.getElementById('sky');
+const ctx = canvas.getContext('2d');
+const cx = canvas.width / 2, cy = canvas.height / 2, R = Math.min(cx, cy) - 20;
+
+function polarToXY(elevation, azimuth) {
+  const r = R * (1 - elevation / 90);
+  const rad = (azimuth - 90) * Math.PI / 180; // 0° azimuth (Nord) in alto
+  return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+}
+
+function drawSkyplot(sats) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Anelli di elevazione 0/30/60/90
+  ctx.strokeStyle = '#333844';
+  ctx.fillStyle = '#5f6368';
+  ctx.font = '11px system-ui';
+  [0, 30, 60].forEach(elev => {
+    const r = R * (1 - elev / 90);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.fillText(elev + '°', cx + 4, cy - r + 12);
+  });
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, 2 * Math.PI);
+  ctx.stroke();
+  // Croce N/S/E/O
+  ctx.beginPath();
+  ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
+  ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
+  ctx.stroke();
+  ctx.fillText('N', cx - 4, cy - R - 6);
+  ctx.fillText('S', cx - 4, cy + R + 14);
+  ctx.fillText('E', cx + R + 6, cy + 4);
+  ctx.fillText('O', cx - R - 14, cy + 4);
+
+  sats.forEach(sat => {
+    if (sat.elevation == null || sat.azimuth == null) return;
+    const [x, y] = polarToXY(sat.elevation, sat.azimuth);
+    ctx.beginPath();
+    ctx.arc(x, y, 7, 0, 2 * Math.PI);
+    ctx.fillStyle = sat.used ? '#34a853' : '#5f6368';
+    ctx.fill();
+    ctx.fillStyle = '#e8eaed';
+    ctx.font = '10px system-ui';
+    ctx.fillText(sat.constellation[0] + sat.prn, x + 9, y + 3);
+  });
+}
+
+function fixBadgeClass(label) {
+  if (label === 'Fix') return 'fix';
+  if (label === 'Float') return 'float';
+  if (label === 'Single' || label === 'DGPS') return 'single';
+  return 'nofix';
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('api/state');
+    const data = await res.json();
+    const badge = document.getElementById('fixBadge');
+    badge.textContent = data.fix_label;
+    badge.className = 'badge ' + fixBadgeClass(data.fix_label);
+    document.getElementById('numSv').textContent = data.num_sv;
+    document.getElementById('accuracy').textContent =
+      data.accuracy_m != null ? data.accuracy_m.toFixed(2) + ' m' : '—';
+    document.getElementById('dop').textContent =
+      (data.hdop != null ? data.hdop.toFixed(1) : '—') + ' / ' +
+      (data.pdop != null ? data.pdop.toFixed(1) : '—');
+    drawSkyplot(data.satellites || []);
+  } catch (e) {
+    console.error('Errore nel refresh:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

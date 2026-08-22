@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+gnss_rtk_base/tests/__pycache__/
+gnss_rtk_base/drivers/__pycache__/

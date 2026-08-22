@@ -1,0 +1,80 @@
+name: "RTK Base Station (Unicore/u-blox)"
+version: "0.2.0"
+slug: "gnss_rtk_base"
+description: >-
+  Legge un ricevitore GNSS RTK via seriale (Unicore UM980/UM982 o u-blox
+  ZED-F9P/M8P, selezionabile con receiver_type — altri ricevitori si
+  aggiungono come nuovo driver in drivers/), invia le correzioni RTCM come
+  server NTRIP (via RTKLIB str2str) verso uno o più caster, ed espone
+  stato/controlli in Home Assistant tramite MQTT (fix status, satelliti,
+  accuratezza, survey-in, posizione manuale).
+url: "https://github.com/<tuo-utente>/ha-gnss-rtk-addon"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+startup: services
+boot: auto
+uart: true
+usb: true
+hassio_api: true
+homeassistant_api: true
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:crosshairs-gps
+panel_title: "RTK Base"
+ports:
+  "2101/tcp": 2101
+ports_description:
+  "2101/tcp": "NTRIP Caster locale per i rover (attivo solo se caster_enabled: true)"
+services:
+  - mqtt:want
+options:
+  # Driver del ricevitore: vedi drivers/ per le opzioni disponibili e come
+  # aggiungerne un altro. "unicore_um98x" = Unicore UM980/UM982,
+  # "ublox_zedf9p" = u-blox ZED-F9P/F9R/M8P.
+  receiver_type: "unicore_um98x"
+  rtcm_port: "/dev/ttyUSB0"
+  nmea_port: "/dev/ttyUSB0"
+  baudrate: 115200
+  survey_in_duration_sec: 300
+  ppp_duration_hours: 6
+  raw_log_retention_hours: 72
+  # Elenco caster NTRIP a cui inviare le correzioni: aggiungi/rimuovi voci
+  # a piacere dalla UI dell'add-on (pulsanti +/- sulla lista). Ogni voce con
+  # "host" valorizzato genera un -out aggiuntivo sulla stessa istanza
+  # str2str; le voci con host vuoto vengono ignorate. Nessun campo "user":
+  # nel protocollo NTRIP1 il ruolo di server/encoder (str2str -out ntrips://)
+  # si autentica solo con la password del mountpoint, non con uno username.
+  ntrip_casters:
+    - host: ""
+      port: 2101
+      mountpoint: ""
+      password: ""
+    - host: ""
+      port: 2101
+      mountpoint: ""
+      password: ""
+  caster_enabled: false
+  caster_mountpoint: "GNSSBASE"
+  caster_user: ""
+  caster_password: ""
+  caster_max_clients: 10
+schema:
+  receiver_type: list(unicore_um98x|ublox_zedf9p)
+  rtcm_port: str
+  nmea_port: str
+  baudrate: int
+  survey_in_duration_sec: int(60,86400)
+  ppp_duration_hours: int(1,48)
+  raw_log_retention_hours: int(6,720)
+  ntrip_casters:
+    - host: str?
+      port: int
+      mountpoint: str?
+      password: password?
+  caster_enabled: bool
+  caster_mountpoint: str
+  caster_user: str?
+  caster_password: password?
+  caster_max_clients: int(1,1000)
