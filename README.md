@@ -448,9 +448,6 @@ invece **`../VERIFICA_HARDWARE.md`**:
   connette, verifica con Wireshark/tcpdump cosa si aspetta esattamente nel
   primo scambio (alcune app inviano `Ntrip-Version: Ntrip/2.0` o intestazioni
   aggiuntive che questa implementazione minimale ignora).
-- Il file `gnss_rtk_base/config.yaml` usa un placeholder `<tuo-utente>` per
-  l'URL del repository: sostituiscilo con il tuo repository GitHub reale
-  prima di pubblicarlo/installarlo.
 
 ## File
 

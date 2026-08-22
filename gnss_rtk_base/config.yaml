@@ -8,7 +8,7 @@ description: >-
   server NTRIP (via RTKLIB str2str) verso uno o più caster, ed espone
   stato/controlli in Home Assistant tramite MQTT (fix status, satelliti,
   accuratezza, survey-in, posizione manuale).
-url: "https://github.com/<tuo-utente>/ha-gnss-rtk-addon"
+url: "https://github.com/Pedronick/ha-gnss-rtk-addon"
 arch:
   - amd64
   - aarch64
