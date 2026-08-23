@@ -483,6 +483,7 @@ invece **`../VERIFICA_HARDWARE.md`**:
 
 - `repository.yaml` — manifest del repository per lo store add-on.
 - `gnss_rtk_base/config.yaml` — manifest dell'add-on (opzioni, architetture).
+- `gnss_rtk_base/icon.png` / `logo.png` — icona mostrata nell'Add-on Store.
 - `gnss_rtk_base/build.yaml` — immagini base per arch.
 - `gnss_rtk_base/Dockerfile` — build immagine (RTKLIB da sorgente + Python).
 - `gnss_rtk_base/run.sh` — entrypoint (bashio, credenziali MQTT da Supervisor).
