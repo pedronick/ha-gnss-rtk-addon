@@ -17,12 +17,19 @@ RUN apk add --no-cache \
         py3-pip \
         git \
         build-base \
+        gfortran \
         linux-headers
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
+# rnx2rtkp si linka anche contro lib/iers (correzioni di marea, in Fortran):
+# va compilata per prima, altrimenti il link falliva con "cannot find
+# .../lib/iers/gcc/iers.a" e "cannot find -lgfortran" (errore verificato
+# realmente in build, non solo teorico: gfortran mancava e iers.a non
+# veniva mai costruita).
 RUN git clone --depth 1 --branch "$RTKLIB_REF" https://github.com/tomojitakasu/RTKLIB.git /tmp/RTKLIB \
+    && (cd /tmp/RTKLIB/lib/iers/gcc && make) \
     && for app in str2str convbin rnx2rtkp; do \
         (cd /tmp/RTKLIB/app/consapp/$app/gcc && make && make install); \
        done \

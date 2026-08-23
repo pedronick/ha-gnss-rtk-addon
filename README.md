@@ -400,11 +400,18 @@ invece **`../VERIFICA_HARDWARE.md`**:
   documentazione pubblica. In entrambi i casi vanno confermati sul
   command/interface manual del tuo modulo: controlla i log dell'add-on per
   eventuali comandi non riconosciuti o non applicati.
-- ~~Path di build di RTKLIB~~ — **risolto**: pinnato al tag `v2.4.3-b34`
-  e i path corretti (`app/consapp/<tool>/gcc`) sono stati verificati
-  clonando quel tag esatto e compilando davvero `str2str` (non solo
-  ipotizzati). Resta da verificare solo il comportamento su Alpine
-  (il build reale di test è stato fatto su Debian/glibc).
+- ~~Path di build di RTKLIB~~ — **risolto e verificato con una build reale
+  dell'immagine Docker su Alpine** (`ghcr.io/home-assistant/amd64-base:3.19`,
+  la stessa base usata da Supervisor), non solo su Debian/glibc: pinnato al
+  tag `v2.4.3-b34`, path corretti (`app/consapp/<tool>/gcc`). Durante il
+  primo build reale su Alpine è emerso un terzo bug (oltre ai due sotto),
+  anch'esso corretto: `rnx2rtkp` si linka anche contro `lib/iers/gcc/iers.a`
+  (libreria Fortran per le correzioni di marea) e contro `-lgfortran` — né
+  il pacchetto `gfortran` era installato, né quella libreria veniva
+  compilata prima. Aggiunto `apk add gfortran` e uno step di build per
+  `lib/iers/gcc` prima di str2str/convbin/rnx2rtkp; l'immagine ora si
+  compila e produce tutti e tre i binari verificati funzionanti dentro il
+  container reale (non solo un test di build isolato).
 - ~~Sintassi `str2str` con più `-out`~~ — **risolto e verificato con un
   binario reale compilato dal tag pinnato**, non solo letto dall'help
   text: la sintassi `-in stream [-out stream [-out stream...]]`, i formati
@@ -416,10 +423,9 @@ invece **`../VERIFICA_HARDWARE.md`**:
   raddoppiava, e `str2str` non partiva mai, **su nessuna configurazione
   precedente di questo add-on**); (2) `str2str` accetta **al massimo 4
   `-out` totali** (`MAXSTR=5` nel sorgente), limite ora imposto
-  esplicitamente (vedi sopra). Non ancora verificati: comportamento su
-  Alpine (test fatto su Debian/glibc) e un caster reale in produzione
-  (RTK2go o simile) — solo un caster locale/irraggiungibile simulato.
-  Non testata la rotazione oraria del file di log (`%Y%m%d%h`), che non è
+  esplicitamente (vedi sopra). Non ancora verificati: un caster reale in
+  produzione (RTK2go o simile) — solo un caster locale/irraggiungibile
+  simulato — e la rotazione oraria del file di log (`%Y%m%d%h`), che non è
   stata necessaria attivare durante questa verifica.
 - **RTKLIB implementa già un ruolo di caster nativo**, scoperto leggendo
   il sorgente durante questa verifica: `str2str -out ntripc://[user:passwd@][:port]/mntpnt[:srctbl]`
