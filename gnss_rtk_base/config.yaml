@@ -1,5 +1,5 @@
 name: "RTK Base Station (Unicore/u-blox)"
-version: "0.2.2"
+version: "0.2.3"
 slug: "gnss_rtk_base"
 description: >-
   Legge un ricevitore GNSS RTK via seriale (Unicore UM980/UM982 o u-blox
@@ -8,7 +8,7 @@ description: >-
   server NTRIP (via RTKLIB str2str) verso uno o più caster, ed espone
   stato/controlli in Home Assistant tramite MQTT (fix status, satelliti,
   accuratezza, survey-in, posizione manuale).
-url: "https://github.com/Pedronick/ha-gnss-rtk-addon"
+url: "https://github.com/pedronick/ha-gnss-rtk-addon"
 arch:
   - amd64
   - aarch64
