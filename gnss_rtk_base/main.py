@@ -36,6 +36,7 @@ BASE = "gnssbase"
 WEBUI_PORT = 8099
 SERIAL_RETRY_INTERVAL_S = 5
 SERIAL_SILENCE_TIMEOUT_S = 15
+MQTT_RETRY_INTERVAL_S = 10
 
 # Formato della riga di stato di str2str (verificato con un binario reale):
 # "2024/01/15 12:34:56 [CC---]        425 B     699 bps (1) send error (111) "
@@ -615,7 +616,15 @@ class App:
         # restare in silenzio.
         mqtt_host = os.environ.get("MQTT_HOST", "localhost")
         mqtt_port = int(os.environ.get("MQTT_PORT", 1883))
-        self.mqtt.connect(mqtt_host, mqtt_port, keepalive=30)
+        while True:
+            try:
+                self.mqtt.connect(mqtt_host, mqtt_port, keepalive=30)
+                break
+            except OSError as e:
+                print(f"[main] broker MQTT non raggiungibile ({mqtt_host}:{mqtt_port}): {e}. "
+                      f"Installa/avvia l'add-on Mosquitto broker (o configura un broker esterno). "
+                      f"Ritento in {MQTT_RETRY_INTERVAL_S}s...", flush=True)
+                time.sleep(MQTT_RETRY_INTERVAL_S)
         self.mqtt.loop_start()
 
         self.configure_receiver()
