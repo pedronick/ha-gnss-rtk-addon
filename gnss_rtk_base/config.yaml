@@ -15,6 +15,11 @@ arch:
   - armv7
 startup: services
 boot: auto
+# Richiesto perché l'immagine base usa s6-overlay come init (/init, PID 1):
+# senza init:false, Supervisor avvolge il container col proprio init/tini
+# di Docker, che diventa PID 1 al posto di s6-overlay, causando
+# "s6-overlay-suexec: fatal: can only run as pid 1" all'avvio.
+init: false
 uart: true
 usb: true
 hassio_api: true
