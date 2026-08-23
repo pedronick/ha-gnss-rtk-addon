@@ -130,8 +130,15 @@ puro, che non ha il Supervisor.
 
 ## Prerequisiti
 
-- Un broker MQTT raggiungibile da Home Assistant (add-on "Mosquitto broker"
-  o integrazione MQTT già configurata).
+- Un broker MQTT **collegato tramite l'integrazione MQTT di Home
+  Assistant** (Impostazioni → Dispositivi e servizi → Integrazioni →
+  MQTT), non basta che il broker sia solo installato/avviato: è
+  l'integrazione a registrare host/porta/credenziali nel servizio che
+  Supervisor comunica agli add-on (`bashio::services mqtt`). Vale sia per
+  l'add-on ufficiale "Mosquitto broker" sia per un broker esterno (es.
+  EMQX): senza integrazione configurata, l'add-on resta in attesa
+  (ritenta ogni 10s, senza andare in crash) mostrando
+  `broker MQTT non raggiungibile` nei log.
 - Il ricevitore GNSS (UM982, u-blox, ...) collegato via USB/seriale
   all'host che esegue Home Assistant.
 
@@ -441,6 +448,23 @@ invece **`../VERIFICA_HARDWARE.md`**:
 - **Spazio disco**: il log raw continuo in `/data/raw_logs` cresce con il
   tempo fino alla retention configurata (`raw_log_retention_hours`, default
   72h). Dimensiona la retention in base allo spazio disponibile sull'host.
+- ~~`init: false` mancante in `config.yaml`~~ — **risolto**, trovato solo
+  durante il primo deploy reale su un'istanza Home Assistant: senza questo
+  campo (assente = `true` di default), Supervisor avvolge il container col
+  proprio init, che diventa PID 1 al posto di `/init` (s6-overlay) già
+  presente nell'immagine base, causando
+  `s6-overlay-suexec: fatal: can only run as pid 1` all'avvio. Non
+  riproducibile con `docker build`/`docker run` diretti (solo con
+  l'orchestrazione reale di Supervisor) — un limite della verifica in
+  questa cartella: build e avvio locali confermano che l'immagine si
+  compila e il codice Python funziona, ma non tutte le convenzioni
+  specifiche di Supervisor (come questa).
+- ~~Crash se il broker MQTT non è ancora pronto~~ — **risolto**, trovato
+  nello stesso deploy reale: `self.mqtt.connect()` falliva con
+  `ConnectionRefusedError` non gestita se nessuna integrazione MQTT è
+  collegata a un broker, terminando l'intero add-on. Ora ritenta ogni 10s
+  con un messaggio chiaro nei log, verificato con una build+esecuzione
+  reale del container senza MQTT disponibile.
 - **Skyplot, satelliti "usati"**: il flag `used` confronta i PRN letti da
   GSA con quelli visti in GSV senza distinguere la costellazione (la
   numerazione NMEA può sovrapporsi tra costellazioni in ricevitori
