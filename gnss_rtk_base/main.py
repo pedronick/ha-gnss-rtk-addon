@@ -634,6 +634,14 @@ class App:
                 time.sleep(MQTT_RETRY_INTERVAL_S)
         self.mqtt.loop_start()
 
+        # Start the Ingress web panel and the raw-log cleanup before
+        # configure_receiver(): that call blocks indefinitely waiting for
+        # the receiver's serial port to appear, and while it waits we
+        # still want the skyplot panel reachable (showing "not connected")
+        # instead of Ingress returning a 502 with nothing listening yet.
+        threading.Thread(target=self.cleanup_raw_logs, daemon=True).start()
+        threading.Thread(target=start_webserver, args=(self.state, nmea.fix_label, WEBUI_PORT), daemon=True).start()
+
         self.configure_receiver()
         try:
             self.validate_stream_budget()
@@ -644,8 +652,6 @@ class App:
             self.mqtt.publish(f"{BASE}/config_error/state", "", retain=True)
             self.start_str2str()
             threading.Thread(target=self.watchdog_str2str, daemon=True).start()
-        threading.Thread(target=self.cleanup_raw_logs, daemon=True).start()
-        threading.Thread(target=start_webserver, args=(self.state, nmea.fix_label, WEBUI_PORT), daemon=True).start()
 
         if self.caster_enabled:
             threading.Thread(target=caster.run_relay_receiver, args=(self.broadcaster,), daemon=True).start()
