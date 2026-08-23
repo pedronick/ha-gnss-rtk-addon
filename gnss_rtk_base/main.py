@@ -617,10 +617,16 @@ class App:
     def run(self):
         print(f"[main] receiver driver: {self.receiver_type} "
               f"({getattr(self.driver, 'NAME', '?')})", flush=True)
-        # MQTT must be connected before configure_receiver(): the latter
-        # may have to wait a long time for the USB to appear, and during
-        # that wait we want to be able to publish the "not connected"
-        # status instead of staying silent.
+        # Start the Ingress web panel and the raw-log cleanup first, before
+        # anything that can block for a long time (MQTT connect retry,
+        # configure_receiver() waiting for the USB): both the MQTT broker
+        # and the receiver may take a while to become available, and while
+        # they do we still want the skyplot panel reachable (showing "not
+        # connected") instead of Ingress returning a 502 with nothing
+        # listening yet. Neither thread touches self.mqtt.
+        threading.Thread(target=self.cleanup_raw_logs, daemon=True).start()
+        threading.Thread(target=start_webserver, args=(self.state, nmea.fix_label, WEBUI_PORT), daemon=True).start()
+
         mqtt_host = os.environ.get("MQTT_HOST", "localhost")
         mqtt_port = int(os.environ.get("MQTT_PORT", 1883))
         while True:
@@ -633,14 +639,6 @@ class App:
                       f"Retrying in {MQTT_RETRY_INTERVAL_S}s...", flush=True)
                 time.sleep(MQTT_RETRY_INTERVAL_S)
         self.mqtt.loop_start()
-
-        # Start the Ingress web panel and the raw-log cleanup before
-        # configure_receiver(): that call blocks indefinitely waiting for
-        # the receiver's serial port to appear, and while it waits we
-        # still want the skyplot panel reachable (showing "not connected")
-        # instead of Ingress returning a 502 with nothing listening yet.
-        threading.Thread(target=self.cleanup_raw_logs, daemon=True).start()
-        threading.Thread(target=start_webserver, args=(self.state, nmea.fix_label, WEBUI_PORT), daemon=True).start()
 
         self.configure_receiver()
         try:
