@@ -1,5 +1,5 @@
 name: "RTK Base Station (Unicore/u-blox)"
-version: "0.2.3"
+version: "0.2.4"
 slug: "gnss_rtk_base"
 description: >-
   Legge un ricevitore GNSS RTK via seriale (Unicore UM980/UM982 o u-blox
