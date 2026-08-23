@@ -26,7 +26,7 @@ def test_parse_gga_no_fix():
 
 def test_parse_gga_rejects_other_sentences():
     assert nmea.parse_gga("$GPGSA,A,3*00") is None
-    assert nmea.parse_gga("non una frase NMEA") is None
+    assert nmea.parse_gga("not an NMEA sentence") is None
 
 
 def test_fix_label_known_and_unknown_quality():

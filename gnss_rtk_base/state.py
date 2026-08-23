@@ -1,7 +1,7 @@
-"""Stato condiviso in memoria tra il monitor NMEA e il web server dello
-skyplot. I satelliti visti via GSV vengono tenuti per un breve periodo
-(finché non arrivano aggiornamenti più recenti) perché una costellazione
-intera è distribuita su più sentenze GSV consecutive."""
+"""In-memory shared state between the NMEA monitor and the skyplot web
+server. Satellites seen via GSV are kept for a short period (until newer
+updates arrive) because a full constellation is spread across several
+consecutive GSV sentences."""
 
 import threading
 import time
@@ -16,7 +16,7 @@ class SharedState:
         self.num_sv = 0
         self.accuracy_m = None
         self.pdop = self.hdop = self.vdop = None
-        self._sats = {}   # (constellation, prn) -> dict con last_seen
+        self._sats = {}   # (constellation, prn) -> dict with last_seen
         self._used_prns = set()
 
     def update_gga(self, fix):

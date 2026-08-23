@@ -32,7 +32,7 @@ def test_satellite_not_used_when_prn_absent_from_gsa():
 def test_stale_satellites_are_pruned_from_snapshot():
     s = SharedState()
     s.update_gsv([{"prn": 1, "constellation": "GPS", "elevation": 10, "azimuth": 10, "snr": 30}])
-    # Forza il satellite ad apparire "vecchio" retrocedendo il suo timestamp.
+    # Force the satellite to appear "stale" by rolling back its timestamp.
     key = ("GPS", 1)
     s._sats[key]["last_seen"] = time.time() - 100
     snap = s.snapshot(nmea.fix_label)

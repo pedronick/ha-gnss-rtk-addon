@@ -1,6 +1,6 @@
-"""Registro dei driver ricevitore disponibili. Ogni driver è un modulo che
-espone configure_rtcm/configure_nmea/set_rover_mode/set_fixed_base (vedi
-base.py per il contratto completo)."""
+"""Registry of available receiver drivers. Each driver is a module that
+exposes configure_rtcm/configure_nmea/set_rover_mode/set_fixed_base (see
+base.py for the full contract)."""
 
 from . import ublox, unicore
 
@@ -15,5 +15,5 @@ def get_driver(name):
         return DRIVERS[name]
     except KeyError:
         raise ValueError(
-            f"Ricevitore non supportato: {name!r}. Opzioni disponibili: {sorted(DRIVERS)}"
+            f"Unsupported receiver: {name!r}. Available options: {sorted(DRIVERS)}"
         ) from None

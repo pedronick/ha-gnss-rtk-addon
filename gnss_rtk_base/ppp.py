@@ -1,9 +1,9 @@
 """
-Elaborazione PPP-static (porting di ppp_process.py dentro l'add-on).
+PPP-static processing (porting of ppp_process.py into the add-on).
 
-Scarica i prodotti IGS precisi per la/le data/e coperte dal log raw
-accumulato da str2str, converte in RINEX con convbin, ed esegue rnx2rtkp
-in modalità PPP-static per ottenere la posizione assoluta della base.
+Downloads the precise IGS products for the date(s) covered by the raw log
+accumulated by str2str, converts it to RINEX with convbin, and runs
+rnx2rtkp in PPP-static mode to get the absolute position of the base.
 """
 
 import datetime as dt
@@ -65,9 +65,9 @@ def gps_week_dow(date):
 
 
 def collect_raw_files(raw_log_dir, start_ts, end_ts):
-    """Seleziona i file gnssbase_YYYYMMDDHH.rtcm3 che coprono
-    [start_ts, end_ts], con un margine di un'ora su entrambi i lati per
-    evitare tagli ai bordi."""
+    """Selects the gnssbase_YYYYMMDDHH.rtcm3 files that cover
+    [start_ts, end_ts], with a one-hour margin on both sides to avoid
+    edge cutoffs."""
     pattern = re.compile(r"gnssbase_(\d{4})(\d{2})(\d{2})(\d{2})\.rtcm3$")
     margin = 3600
     selected = []
@@ -97,8 +97,8 @@ def convbin(raw_path, workdir):
 
 
 def parse_obs_dates(obs_path):
-    """Ritorna l'insieme delle date UTC coperte dal file RINEX (di solito
-    una, ma può essere più di una se la campagna attraversa la mezzanotte)."""
+    """Returns the set of UTC dates covered by the RINEX file (usually
+    one, but can be more if the campaign spans midnight)."""
     dates = set()
     with open(obs_path, "r", errors="ignore") as f:
         for line in f:
@@ -109,7 +109,7 @@ def parse_obs_dates(obs_path):
             if line.startswith(">"):
                 break
     if not dates:
-        raise ValueError(f"Non trovo TIME OF FIRST/LAST OBS in {obs_path}")
+        raise ValueError(f"Cannot find TIME OF FIRST/LAST OBS in {obs_path}")
     return sorted(dates)
 
 
@@ -142,8 +142,8 @@ def build_igs_names(date, product):
 
 
 def fetch_precise_products(dates, workdir, product="FIN"):
-    """Scarica SP3+CLK per ogni data coperta, e l'ANTEX (una sola volta,
-    cache condivisa). Ritorna (lista_sp3, lista_clk, path_atx)."""
+    """Downloads SP3+CLK for each covered date, and the ANTEX file (once,
+    shared cache). Returns (sp3_list, clk_list, atx_path)."""
     sp3_paths, clk_paths = [], []
     for date in dates:
         week, _ = gps_week_dow(date)
@@ -153,16 +153,16 @@ def fetch_precise_products(dates, workdir, product="FIN"):
         sp3_urls = [f"{m.format(week=week)}/{sp3_name}" for m in SP3_CLK_MIRRORS]
         clk_urls = [f"{m.format(week=week)}/{clk_name}" for m in SP3_CLK_MIRRORS]
         if not try_download(sp3_urls, sp3_gz):
-            raise RuntimeError(f"Download SP3 fallito per {date}")
+            raise RuntimeError(f"SP3 download failed for {date}")
         if not try_download(clk_urls, clk_gz):
-            raise RuntimeError(f"Download CLK fallito per {date}")
+            raise RuntimeError(f"CLK download failed for {date}")
         sp3_paths.append(gunzip(sp3_gz))
         clk_paths.append(gunzip(clk_gz))
 
     atx_path = workdir / "igs20.atx"
     if not atx_path.exists():
         if not try_download(ANTEX_MIRRORS, atx_path):
-            raise RuntimeError("Download igs20.atx fallito")
+            raise RuntimeError("igs20.atx download failed")
     return sp3_paths, clk_paths, atx_path
 
 
@@ -177,7 +177,7 @@ def run_rnx2rtkp(obs_path, nav_path, sp3_paths, clk_paths, atx_path, workdir):
 
 
 def parse_last_position(pos_path):
-    """Ritorna (lat, lon, height) dell'ultima epoca valida del file .pos."""
+    """Returns (lat, lon, height) of the last valid epoch in the .pos file."""
     last = None
     with open(pos_path, "r", errors="ignore") as f:
         for line in f:
@@ -192,5 +192,5 @@ def parse_last_position(pos_path):
                 continue
             last = (lat, lon, height)
     if last is None:
-        raise ValueError(f"Nessuna epoca valida trovata in {pos_path}")
+        raise ValueError(f"No valid epoch found in {pos_path}")
     return last

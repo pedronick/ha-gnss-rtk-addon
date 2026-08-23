@@ -1,15 +1,15 @@
 ARG BUILD_FROM
 FROM $BUILD_FROM
 
-# Dipendenze di build e runtime.
+# Build and runtime dependencies.
 #
-# RTKLIB è pinnato al tag v2.4.3-b34 (commit 180043ee24b6d2b168f98b64be15f69d50046b1a),
-# l'ultima release stabile al momento della scrittura, per build riproducibili
-# (in precedenza si clonava sempre l'HEAD del branch, senza alcuna garanzia di
-# stabilità nel tempo). Path e comando di build VERIFICATI compilando
-# effettivamente str2str/convbin/rnx2rtkp da questo tag esatto: la struttura
-# reale è "app/consapp/<tool>/gcc" (non "app/<tool>/gcc" come ipotizzato in una
-# versione precedente di questo Dockerfile, che non avrebbe mai funzionato).
+# RTKLIB is pinned to tag v2.4.3-b34 (commit 180043ee24b6d2b168f98b64be15f69d50046b1a),
+# the latest stable release at the time of writing, for reproducible builds
+# (previously the branch HEAD was always cloned, with no guarantee of
+# stability over time). Path and build command VERIFIED by actually
+# compiling str2str/convbin/rnx2rtkp from this exact tag: the real
+# structure is "app/consapp/<tool>/gcc" (not "app/<tool>/gcc" as assumed in
+# an earlier version of this Dockerfile, which would never have worked).
 ARG RTKLIB_REF=v2.4.3-b34
 
 RUN apk add --no-cache \
@@ -23,11 +23,11 @@ RUN apk add --no-cache \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
-# rnx2rtkp si linka anche contro lib/iers (correzioni di marea, in Fortran):
-# va compilata per prima, altrimenti il link falliva con "cannot find
-# .../lib/iers/gcc/iers.a" e "cannot find -lgfortran" (errore verificato
-# realmente in build, non solo teorico: gfortran mancava e iers.a non
-# veniva mai costruita).
+# rnx2rtkp also links against lib/iers (Fortran tidal corrections): it
+# must be built first, otherwise linking failed with "cannot find
+# .../lib/iers/gcc/iers.a" and "cannot find -lgfortran" (error verified
+# for real in a build, not just theoretical: gfortran was missing and
+# iers.a was never built).
 RUN git clone --depth 1 --branch "$RTKLIB_REF" https://github.com/tomojitakasu/RTKLIB.git /tmp/RTKLIB \
     && (cd /tmp/RTKLIB/lib/iers/gcc && make) \
     && for app in str2str convbin rnx2rtkp; do \

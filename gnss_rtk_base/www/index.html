@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>RTK Base — Satelliti</title>
+<title>RTK Base — Satellites</title>
 <style>
   body { background:#111318; color:#e8eaed; font-family: system-ui, sans-serif; margin:0; padding:16px; }
   h1 { font-size:18px; font-weight:600; margin:0 0 12px; }
@@ -22,17 +22,17 @@
 </style>
 </head>
 <body>
-  <h1>RTK Base — Satelliti e stato del fix</h1>
+  <h1>RTK Base — Satellites and fix status</h1>
   <div class="header">
     <div><span id="fixBadge" class="badge nofix">—</span></div>
-    <div class="stat">Satelliti in uso<b id="numSv">—</b></div>
-    <div class="stat">Accuratezza stimata<b id="accuracy">—</b></div>
+    <div class="stat">Satellites in use<b id="numSv">—</b></div>
+    <div class="stat">Estimated accuracy<b id="accuracy">—</b></div>
     <div class="stat">HDOP / PDOP<b id="dop">—</b></div>
   </div>
   <canvas id="sky" width="480" height="480"></canvas>
   <div class="legend">
-    <span class="used">Usato nel fix</span>
-    <span class="visible">Visibile, non usato</span>
+    <span class="used">Used in fix</span>
+    <span class="visible">Visible, not used</span>
   </div>
 
 <script>
@@ -42,13 +42,13 @@ const cx = canvas.width / 2, cy = canvas.height / 2, R = Math.min(cx, cy) - 20;
 
 function polarToXY(elevation, azimuth) {
   const r = R * (1 - elevation / 90);
-  const rad = (azimuth - 90) * Math.PI / 180; // 0° azimuth (Nord) in alto
+  const rad = (azimuth - 90) * Math.PI / 180; // 0° azimuth (North) at the top
   return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
 }
 
 function drawSkyplot(sats) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  // Anelli di elevazione 0/30/60/90
+  // Elevation rings at 0/30/60/90
   ctx.strokeStyle = '#333844';
   ctx.fillStyle = '#5f6368';
   ctx.font = '11px system-ui';
@@ -62,7 +62,7 @@ function drawSkyplot(sats) {
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, 2 * Math.PI);
   ctx.stroke();
-  // Croce N/S/E/O
+  // N/S/E/W cross
   ctx.beginPath();
   ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
   ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
@@ -70,7 +70,7 @@ function drawSkyplot(sats) {
   ctx.fillText('N', cx - 4, cy - R - 6);
   ctx.fillText('S', cx - 4, cy + R + 14);
   ctx.fillText('E', cx + R + 6, cy + 4);
-  ctx.fillText('O', cx - R - 14, cy + 4);
+  ctx.fillText('W', cx - R - 14, cy + 4);
 
   sats.forEach(sat => {
     if (sat.elevation == null || sat.azimuth == null) return;
@@ -107,7 +107,7 @@ async function refresh() {
       (data.pdop != null ? data.pdop.toFixed(1) : '—');
     drawSkyplot(data.satellites || []);
   } catch (e) {
-    console.error('Errore nel refresh:', e);
+    console.error('Refresh error:', e);
   }
 }
 

@@ -1,12 +1,12 @@
 """
-Driver Unicore, per la famiglia UM980/UM982 (stesso set di comandi ASCII).
+Unicore driver, for the UM980/UM982 family (same ASCII command set).
 
-ATTENZIONE: la sintassi esatta dei comandi Unicore può variare tra
-firmware/revisioni. Verifica sempre nel log dell'add-on (stdout) che ogni
-comando riceva una risposta di conferma dal modulo; se un comando non è
-riconosciuto, controlla il command manual UM982 e adatta le stringhe qui
-sotto (alcune revisioni usano "rtcm1077 1" diretto invece di
-"log rtcm1077 ontime 1"). Contratto del driver: vedi drivers/base.py.
+WARNING: the exact syntax of Unicore commands may vary between
+firmware/revisions. Always check in the add-on log (stdout) that every
+command receives a confirmation response from the module; if a command
+is not recognized, check the UM982 command manual and adapt the strings
+below (some revisions use "rtcm1077 1" directly instead of
+"log rtcm1077 ontime 1"). Driver contract: see drivers/base.py.
 """
 
 import time
@@ -30,7 +30,7 @@ def send_commands(port, baud, commands):
 
 
 def configure_rtcm(port, baud):
-    """Abilita RTCM3 (coordinate stazione + osservazioni MSM7) sulla porta indicata."""
+    """Enables RTCM3 (station coordinates + MSM7 observations) on the given port."""
     send_commands(port, baud, [
         "log rtcm1005 ontime 10",
         "log rtcm1077 ontime 1",
@@ -42,12 +42,12 @@ def configure_rtcm(port, baud):
 
 
 def configure_nmea(port, baud):
-    """Abilita GGA (fix/satelliti), GST (accuratezza), GSV (satelliti in
-    vista, per lo skyplot) e GSA (satelliti usati nel fix + DOP) sulla
-    porta indicata.
+    """Enables GGA (fix/satellites), GST (accuracy), GSV (satellites in
+    view, for the skyplot) and GSA (satellites used in the fix + DOP) on
+    the given port.
 
-    Se rtcm_port == nmea_port, questa funzione va chiamata dopo
-    configure_rtcm() sulla stessa porta: i due set di messaggi si sommano.
+    If rtcm_port == nmea_port, this function must be called after
+    configure_rtcm() on the same port: the two message sets add up.
     """
     send_commands(port, baud, [
         "log gga ontime 1",
@@ -59,15 +59,15 @@ def configure_nmea(port, baud):
 
 
 def set_rover_mode(port, baud):
-    """Mette il ricevitore in modalità rover (posizionamento standalone),
-    necessario prima di un survey-in per ottenere fix non vincolati a una
-    posizione base già fissata."""
+    """Puts the receiver in rover mode (standalone positioning), needed
+    before a survey-in to get fixes not constrained by an already fixed
+    base position."""
     send_commands(port, baud, ["mode rover"])
 
 
 def set_fixed_base(port, baud, lat, lon, height):
-    """Imposta il modulo in modalità BASE con posizione fissa (gradi
-    decimali WGS84, altezza ellissoidica in metri) e salva la configurazione."""
+    """Sets the module to BASE mode with a fixed position (WGS84 decimal
+    degrees, ellipsoidal height in meters) and saves the configuration."""
     send_commands(port, baud, [
         f"mode base {lat:.8f} {lon:.8f} {height:.3f}",
         "saveconfig",

@@ -1,13 +1,13 @@
 name: "RTK Base Station (Unicore/u-blox)"
-version: "0.2.4"
+version: "0.2.5"
 slug: "gnss_rtk_base"
 description: >-
-  Legge un ricevitore GNSS RTK via seriale (Unicore UM980/UM982 o u-blox
-  ZED-F9P/M8P, selezionabile con receiver_type — altri ricevitori si
-  aggiungono come nuovo driver in drivers/), invia le correzioni RTCM come
-  server NTRIP (via RTKLIB str2str) verso uno o più caster, ed espone
-  stato/controlli in Home Assistant tramite MQTT (fix status, satelliti,
-  accuratezza, survey-in, posizione manuale).
+  Reads a GNSS RTK receiver over serial (Unicore UM980/UM982 or u-blox
+  ZED-F9P/M8P, selectable via receiver_type — other receivers can be
+  added as a new driver in drivers/), sends RTCM corrections as an NTRIP
+  server (via RTKLIB str2str) to one or more casters, and exposes
+  status/controls in Home Assistant via MQTT (fix status, satellites,
+  accuracy, survey-in, manual position).
 url: "https://github.com/pedronick/ha-gnss-rtk-addon"
 arch:
   - amd64
@@ -15,10 +15,10 @@ arch:
   - armv7
 startup: services
 boot: auto
-# Richiesto perché l'immagine base usa s6-overlay come init (/init, PID 1):
-# senza init:false, Supervisor avvolge il container col proprio init/tini
-# di Docker, che diventa PID 1 al posto di s6-overlay, causando
-# "s6-overlay-suexec: fatal: can only run as pid 1" all'avvio.
+# Required because the base image uses s6-overlay as its init (/init, PID 1):
+# without init:false, Supervisor wraps the container with Docker's own
+# init/tini, which becomes PID 1 instead of s6-overlay, causing
+# "s6-overlay-suexec: fatal: can only run as pid 1" at startup.
 init: false
 uart: true
 usb: true
@@ -31,12 +31,12 @@ panel_title: "RTK Base"
 ports:
   "2101/tcp": 2101
 ports_description:
-  "2101/tcp": "NTRIP Caster locale per i rover (attivo solo se caster_enabled: true)"
+  "2101/tcp": "Local NTRIP Caster for rovers (active only if caster_enabled: true)"
 services:
   - mqtt:want
 options:
-  # Driver del ricevitore: vedi drivers/ per le opzioni disponibili e come
-  # aggiungerne un altro. "unicore_um98x" = Unicore UM980/UM982,
+  # Receiver driver: see drivers/ for the available options and how to
+  # add another one. "unicore_um98x" = Unicore UM980/UM982,
   # "ublox_zedf9p" = u-blox ZED-F9P/F9R/M8P.
   receiver_type: "unicore_um98x"
   rtcm_port: "/dev/ttyUSB0"
@@ -45,12 +45,12 @@ options:
   survey_in_duration_sec: 300
   ppp_duration_hours: 6
   raw_log_retention_hours: 72
-  # Elenco caster NTRIP a cui inviare le correzioni: aggiungi/rimuovi voci
-  # a piacere dalla UI dell'add-on (pulsanti +/- sulla lista). Ogni voce con
-  # "host" valorizzato genera un -out aggiuntivo sulla stessa istanza
-  # str2str; le voci con host vuoto vengono ignorate. Nessun campo "user":
-  # nel protocollo NTRIP1 il ruolo di server/encoder (str2str -out ntrips://)
-  # si autentica solo con la password del mountpoint, non con uno username.
+  # List of NTRIP casters to send corrections to: add/remove entries as
+  # you like from the add-on UI (+/- buttons on the list). Each entry with
+  # a non-empty "host" generates an extra -out on the same str2str
+  # instance; entries with an empty host are ignored. No "user" field:
+  # in the NTRIP1 protocol, the server/encoder role (str2str -out ntrips://)
+  # authenticates only with the mountpoint password, not with a username.
   ntrip_casters:
     - host: ""
       port: 2101

@@ -1,6 +1,6 @@
-"""Helper per pubblicare configurazioni MQTT Discovery raggruppate come un
-unico dispositivo "RTK Base Station" in Home Assistant, indipendentemente
-dal ricevitore GNSS effettivamente usato (vedi drivers/)."""
+"""Helpers for publishing MQTT Discovery configs grouped as a single
+"RTK Base Station" device in Home Assistant, regardless of the actual
+GNSS receiver in use (see drivers/)."""
 
 import json
 
@@ -8,7 +8,7 @@ DEVICE = {
     "identifiers": ["gnss_rtk_base"],
     "name": "RTK Base Station",
     "manufacturer": "GNSS RTK",
-    "model": "generico",  # sovrascritto a runtime da main.py col driver selezionato
+    "model": "generic",  # overwritten at runtime by main.py with the selected driver
 }
 
 

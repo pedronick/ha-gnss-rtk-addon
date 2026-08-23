@@ -1,153 +1,153 @@
-# RTK Base Station — Add-on Home Assistant (Unicore / u-blox)
+# RTK Base Station — Home Assistant Add-on (Unicore / u-blox)
 
-Add-on Supervisor (non un'integrazione HACS in senso stretto — vedi nota
-sotto), nato per l'Unicore UM982 ma **strutturato con un driver per
-ricevitore** (vedi sezione "Supporto multi-ricevitore" più sotto) — supporta
-oggi anche u-blox ZED-F9P/M8P, e ne può supportare altri con un nuovo
-modulo in `drivers/`. Cosa fa:
-- legge il ricevitore GNSS RTK configurato (`receiver_type`) via seriale;
-- invia le correzioni RTCM come **server NTRIP** a uno o più caster tramite
-  RTKLIB `str2str` (stesso ruolo dei servizi `str2str_ntrip_A/B` di
-  RTKBase);
-- espone in Home Assistant via **MQTT Discovery**:
-  - `sensor.fix_status` — Single / DGPS / Float / Fix / ecc.
-  - `sensor.satelliti_in_uso`
-  - `sensor.accuratezza_stimata` (metri, da NMEA GST)
-  - `sensor.survey_in` — idle / running / done / error / **cancelled** (media rapida, metrica)
-  - `button.avvia_survey_in` / `button.annulla_survey_in`
-  - `sensor.survey_in_tempo_rimanente` (secondi, aggiornato ogni secondo mentre è in corso)
-  - `sensor.campagna_ppp` — idle / logging / processing / done / error / **cancelled**
-  - `number.durata_campagna_ppp` (ore)
-  - `button.avvia_campagna_ppp` / `button.annulla_campagna_ppp` — elaborazione PPP-static su log raw di più ore (centimetrica)
-  - `sensor.campagna_ppp_tempo_rimanente` (secondi, aggiornato ogni secondo durante la fase di registrazione)
-  - `number.latitudine_manuale` / `longitudine_manuale` / `altezza_manuale`
-  - `button.applica_posizione_manuale`
-  - `sensor.rover_connessi_caster_locale` (solo se `caster_enabled: true`)
-  - `binary_sensor.dispositivo_connesso` — ON/OFF, utile per automazioni/notifiche
-  - `sensor.ultimo_dato_ricevuto` (timestamp dell'ultimo dato NMEA valido)
-  - `sensor.rtcm_bitrate_in_ingresso` (bps, dallo stato reale di `str2str`)
-  - `sensor.stato_uscita_1/2/3/...` (uno per ogni caster/log/relay locale
-    configurato: Connesso / In attesa / Chiuso / Errore, letto dallo stato
-    reale di `str2str`, non solo dal fatto che il processo sia vivo)
-  - `sensor.diagnostica_str2str` (ultimo messaggio di errore/stato dai
-    singoli output, es. una password errata sul caster)
-  - `sensor.errore_di_configurazione` (es. troppi output configurati, vedi
-    sotto)
-  - `sensor.ultima_posizione_calcolata` (timestamp + attributi con
-    lat/lon/height/metodo/parametri, vedi sotto)
-- opzionalmente, fa da **NTRIP Caster locale** (porta 2101/tcp) a cui i rover
-  possono collegarsi direttamente, in aggiunta o al posto dei caster esterni
+Supervisor add-on (not strictly a HACS integration — see the note below),
+originally built for the Unicore UM982 but **structured with a per-receiver
+driver** (see the "Multi-receiver support" section below) — it now also
+supports u-blox ZED-F9P/M8P, and can support others with a new module in
+`drivers/`. What it does:
+- reads the configured RTK GNSS receiver (`receiver_type`) over serial;
+- sends RTCM corrections as an **NTRIP server** to one or more casters via
+  RTKLIB `str2str` (the same role as RTKBase's `str2str_ntrip_A/B`
+  services);
+- exposes in Home Assistant via **MQTT Discovery**:
+  - `sensor.fix_status` — Single / DGPS / Float / Fix / etc.
+  - `sensor.satellites_in_use`
+  - `sensor.estimated_accuracy` (meters, from NMEA GST)
+  - `sensor.survey_in` — idle / running / done / error / **cancelled** (quick average, metric-level)
+  - `button.start_survey_in` / `button.cancel_survey_in`
+  - `sensor.survey_in_time_remaining` (seconds, updated every second while running)
+  - `sensor.ppp_campaign` — idle / logging / processing / done / error / **cancelled**
+  - `number.ppp_campaign_duration` (hours)
+  - `button.start_ppp_campaign` / `button.cancel_ppp_campaign` — PPP-static processing over multi-hour raw logs (centimeter-level)
+  - `sensor.ppp_campaign_time_remaining` (seconds, updated every second during the logging phase)
+  - `number.manual_latitude` / `manual_longitude` / `manual_height`
+  - `button.apply_manual_position`
+  - `sensor.local_caster_connected_rovers` (only if `caster_enabled: true`)
+  - `binary_sensor.device_connected` — ON/OFF, useful for automations/notifications
+  - `sensor.last_data_received` (timestamp of the last valid NMEA data)
+  - `sensor.rtcm_bitrate_in` (bps, from `str2str`'s real status)
+  - `sensor.output_status_1/2/3/...` (one per configured caster/log/local
+    relay: Connected / Waiting / Closed / Error, read from `str2str`'s
+    actual status, not just whether the process is alive)
+  - `sensor.str2str_diagnostics` (last error/status message from the
+    individual outputs, e.g. a wrong password on the caster)
+  - `sensor.configuration_error` (e.g. too many outputs configured, see
+    below)
+  - `sensor.last_computed_position` (timestamp + attributes with
+    lat/lon/height/method/parameters, see below)
+- optionally, acts as a **local NTRIP Caster** (port 2101/tcp) that rovers
+  can connect to directly, in addition to or instead of external casters
 
-Espone inoltre un **pannello grafico nella sidebar di Home Assistant**
-(via Ingress) con uno skyplot in tempo reale: satelliti visibili
-posizionati per azimuth/elevazione, colorati in verde se usati nel fix
-corrente, badge con stato del fix, satelliti in uso, accuratezza stimata,
-HDOP/PDOP. Nessuna configurazione aggiuntiva richiesta: appare
-automaticamente nella sidebar dopo l'installazione ("RTK Base").
+It also exposes a **graphical panel in the Home Assistant sidebar**
+(via Ingress) with a real-time skyplot: visible satellites positioned by
+azimuth/elevation, colored green when used in the current fix, a badge with
+fix status, satellites in use, estimated accuracy, HDOP/PDOP. No extra
+configuration required: it appears automatically in the sidebar after
+installation ("RTK Base").
 
-## Supporto multi-ricevitore
+## Multi-receiver support
 
-Tutto il resto della pipeline (RTKLIB `str2str`, parsing NMEA per
-fix/satelliti/skyplot, caster NTRIP locale, campagna PPP) è già generico:
-RTCM3 e NMEA-0183 sono protocolli standard, non specifici di un
-produttore. L'unica parte davvero dipendente dal ricevitore è **come lo si
-configura** (abilitare i messaggi giusti, impostare la posizione base
-fissa) — isolata nel package `drivers/`:
+The rest of the pipeline (RTKLIB `str2str`, NMEA parsing for
+fix/satellites/skyplot, local NTRIP caster, PPP campaign) is already
+generic: RTCM3 and NMEA-0183 are standard protocols, not vendor-specific.
+The only genuinely receiver-dependent part is **how it's configured**
+(enabling the right messages, setting the fixed base position) — isolated
+in the `drivers/` package:
 
-- `drivers/base.py` — documenta il contratto: ogni driver è un modulo che
-  espone `configure_rtcm(port, baud)`, `configure_nmea(port, baud)`,
+- `drivers/base.py` — documents the contract: each driver is a module that
+  exposes `configure_rtcm(port, baud)`, `configure_nmea(port, baud)`,
   `set_rover_mode(port, baud)`, `set_fixed_base(port, baud, lat, lon, height)`.
-- `drivers/unicore.py` — driver per Unicore UM980/UM982 (comandi ASCII
+- `drivers/unicore.py` — driver for Unicore UM980/UM982 (ASCII commands
   `log ... ontime ...` / `mode base|rover`).
-- `drivers/ublox.py` — driver per u-blox ZED-F9P/F9R/M8P (protocollo
-  binario UBX: `UBX-CFG-MSG` per abilitare i messaggi, `UBX-CFG-TMODE3`
-  per rover/base fissa).
-- `drivers/__init__.py` — registro; l'opzione `receiver_type` dell'add-on
-  seleziona quale driver usare (`unicore_um98x` o `ublox_zedf9p`).
+- `drivers/ublox.py` — driver for u-blox ZED-F9P/F9R/M8P (binary UBX
+  protocol: `UBX-CFG-MSG` to enable messages, `UBX-CFG-TMODE3`
+  for rover/fixed base).
+- `drivers/__init__.py` — registry; the add-on's `receiver_type` option
+  selects which driver to use (`unicore_um98x` or `ublox_zedf9p`).
 
-**Per aggiungere un altro ricevitore** (es. Septentrio Mosaic-X5): crea
-`drivers/nuovo_modulo.py` con le stesse quattro funzioni, registralo in
-`drivers/__init__.py` (`DRIVERS["nuovo_modulo"] = nuovo_modulo`), e
-aggiungi il valore all'enum `receiver_type` in `config.yaml`. Nessuna
-modifica richiesta al resto del codice (`main.py`, `nmea.py`, `ppp.py`,
-`caster.py` restano invariati).
+**To add another receiver** (e.g. Septentrio Mosaic-X5): create
+`drivers/new_module.py` with the same four functions, register it in
+`drivers/__init__.py` (`DRIVERS["new_module"] = new_module`), and add the
+value to the `receiver_type` enum in `config.yaml`. No changes required
+to the rest of the code (`main.py`, `nmea.py`, `ppp.py`, `caster.py`
+stay unchanged).
 
-Il driver u-blox è stato validato solo a livello di codice: framing
-UBX/checksum testato con round-trip numerico (lat/lon/altezza codificate e
-decodificate correttamente) e con un ACK/NAK simulato via pty, ma **non**
-con un modulo ZED-F9P reale — gli ID dei messaggi RTCM3/NMEA e il layout
-di TMODE3 vengono dalla documentazione pubblica u-blox e vanno confermati
-sul tuo hardware (vedi il disclaimer in testa a `drivers/ublox.py`). Per
-aiutare la verifica, ogni comando ora attende e logga esplicitamente la
-risposta UBX-ACK-ACK/NAK del modulo, invece di inviare "alla cieca" come
-nella prima versione — un log `NAK` o `nessuna risposta` è già un segnale
-diagnostico affidabile. Vedi **`../VERIFICA_HARDWARE.md`** per il
-protocollo di test completo (driver, `str2str`, caster locale, resilienza
-USB, survey-in/PPP) da seguire con hardware reale.
+The u-blox driver has only been validated at the code level: UBX
+framing/checksum tested with a numeric round-trip (lat/lon/height correctly
+encoded and decoded) and with a simulated ACK/NAK over a pty, but **not**
+with a real ZED-F9P module — the RTCM3/NMEA message IDs and the TMODE3
+layout come from public u-blox documentation and need to be confirmed on
+your hardware (see the disclaimer at the top of `drivers/ublox.py`). To
+help with verification, every command now explicitly waits for and logs
+the module's UBX-ACK-ACK/NAK response, instead of sending "blind" as in
+the first version — a `NAK` or `no response` log line is already a
+reliable diagnostic signal. See **`../HARDWARE_VERIFICATION.md`** for the
+full test protocol (driver, `str2str`, local caster, USB resilience,
+survey-in/PPP) to follow with real hardware.
 
-Entità, topic MQTT (`gnssbase/...`), device (`RTK Base Station`, con
-`model` impostato a runtime sul nome del driver selezionato) e file di log
-(`gnssbase_*.rtcm3`) sono ora generici, senza riferimenti a "UM982" —
-coerente con il fatto di supportare più ricevitori. Essendo un progetto
-non ancora installato su un'istanza reale, questo rebranding non ha dovuto
-preoccuparsi di rompere `unique_id`/entità esistenti; se in futuro cambi
-ancora questi nomi su un'installazione già in uso, le vecchie entità
-resteranno "orfane" in HA finché non le rimuovi manualmente.
+Entities, MQTT topics (`gnssbase/...`), device (`RTK Base Station`, with
+`model` set at runtime to the selected driver's name) and log files
+(`gnssbase_*.rtcm3`) are now generic, with no references to "UM982" —
+consistent with supporting multiple receivers. Since this project hasn't
+yet been installed on a real instance, this rebranding didn't have to
+worry about breaking existing `unique_id`s/entities; if you change these
+names again in the future on an already-in-use installation, the old
+entities will remain "orphaned" in HA until you remove them manually.
 
-## Relazione con gli altri file della cartella `um982/`
+## Relationship with the other files in the `um982/` folder
 
-Questo add-on è una delle tre strade percorse per la stessa base RTK,
-documentate nella cartella principale:
+This add-on is one of three paths pursued for the same RTK base,
+documented in the top-level folder:
 
-- **`../ISTRUZIONI.md`** — procedura manuale via script Python +
+- **`../ISTRUZIONI.md`** — manual procedure via Python scripts +
   ESP32 ([esp32-ntrip-DUO](https://github.com/designer2k2/esp32-ntrip-DUO/)).
-  Questo add-on **sostituisce interamente** quella procedura se usi Home
-  Assistant: internalizza `configure_um982.py` (in `drivers/unicore.py`),
-  `ppp_process.py` (in `ppp.py`, richiamato dalla campagna PPP) e
-  `set_um982_base.py` (posizione manuale/survey-in/campagna PPP), e non
-  richiede l'ESP32 perché fa già lui da server NTRIP multi-caster.
-- **`../RTKBASE_PROXMOX.md`** — alternativa con RTKBase su una VM Proxmox.
-  Copre lo stesso caso d'uso (multi-caster + gestione UM982) ma fuori da
-  Home Assistant, senza il pannello skyplot integrato.
-- Gli script standalone (`../ppp_process.py`, `../configure_um982.py`,
-  `../set_um982_base.py`) restano utili come riferimento indipendente
-  dall'add-on, ad esempio per rielaborare manualmente un log raw o per
-  verificare/confrontare un risultato PPP fuori dal container.
+  This add-on **entirely replaces** that procedure if you use Home
+  Assistant: it internalizes `configure_um982.py` (in `drivers/unicore.py`),
+  `ppp_process.py` (in `ppp.py`, invoked by the PPP campaign) and
+  `set_um982_base.py` (manual position/survey-in/PPP campaign), and doesn't
+  need the ESP32 because it already acts as a multi-caster NTRIP server.
+- **`../RTKBASE_PROXMOX.md`** — alternative using RTKBase on a Proxmox VM.
+  Covers the same use case (multi-caster + UM982 management) but outside
+  Home Assistant, without the integrated skyplot panel.
+- The standalone scripts (`../ppp_process.py`, `../configure_um982.py`,
+  `../set_um982_base.py`) remain useful as an independent reference
+  outside the add-on, for example to manually reprocess a raw log or to
+  verify/compare a PPP result outside the container.
 
-Se stai partendo da zero e usi già Home Assistant Supervised/OS, questo
-add-on è il percorso più diretto: non serve seguire `ISTRUZIONI.md` passo
-per passo, basta questo README.
+If you're starting from scratch and already use Home Assistant
+Supervised/OS, this add-on is the most direct path: no need to follow
+`ISTRUZIONI.md` step by step, this README is enough.
 
-## Nota terminologica: HACS vs Add-on
+## Terminology note: HACS vs Add-on
 
-Questo è un **Add-on Supervisor** (container Docker), non un'integrazione
-HACS. Si installa con lo stesso meccanismo "aggiungi repository Git" che
-usi con HACS, ma dal menu nativo di Home Assistant:
-**Impostazioni → Add-on → Add-on Store → ⋮ (in alto a destra) → Repository**,
-incollando l'URL di questo repository. Funziona solo su installazioni
-**Home Assistant OS** o **Supervised** — non su "Home Assistant Container"
-puro, che non ha il Supervisor.
+This is a **Supervisor Add-on** (Docker container), not a HACS
+integration. It's installed with the same "add Git repository" mechanism
+you use with HACS, but from Home Assistant's native menu:
+**Settings → Add-ons → Add-on Store → ⋮ (top right) → Repositories**,
+pasting this repository's URL. It only works on
+**Home Assistant OS** or **Supervised** installations — not on plain
+"Home Assistant Container", which has no Supervisor.
 
-## Prerequisiti
+## Prerequisites
 
-- Un broker MQTT **collegato tramite l'integrazione MQTT di Home
-  Assistant** (Impostazioni → Dispositivi e servizi → Integrazioni →
-  MQTT), non basta che il broker sia solo installato/avviato: è
-  l'integrazione a registrare host/porta/credenziali nel servizio che
-  Supervisor comunica agli add-on (`bashio::services mqtt`). Vale sia per
-  l'add-on ufficiale "Mosquitto broker" sia per un broker esterno (es.
-  EMQX): senza integrazione configurata, l'add-on resta in attesa
-  (ritenta ogni 10s, senza andare in crash) mostrando
-  `broker MQTT non raggiungibile` nei log.
-- Il ricevitore GNSS (UM982, u-blox, ...) collegato via USB/seriale
-  all'host che esegue Home Assistant.
+- An MQTT broker **connected via Home Assistant's MQTT integration**
+  (Settings → Devices & services → Integrations →
+  MQTT). It's not enough for the broker to just be installed/started: the
+  integration is what registers host/port/credentials in the service that
+  Supervisor exposes to add-ons (`bashio::services mqtt`). This applies
+  both to the official "Mosquitto broker" add-on and to an external
+  broker (e.g. EMQX): without a configured integration, the add-on stays
+  waiting (retrying every 10s, without crashing), showing
+  `MQTT broker unreachable` in the logs.
+- The GNSS receiver (UM982, u-blox, ...) connected via USB/serial to
+  the host running Home Assistant.
 
-## Configurazione
+## Configuration
 
-Nell'add-on, scheda "Configuration":
+In the add-on, "Configuration" tab:
 
 ```yaml
-receiver_type: unicore_um98x   # oppure: ublox_zedf9p
+receiver_type: unicore_um98x   # or: ublox_zedf9p
 rtcm_port: /dev/ttyUSB0
 nmea_port: /dev/ttyUSB0
 baudrate: 115200
@@ -155,214 +155,213 @@ survey_in_duration_sec: 300
 ntrip_casters:
   - host: rtk2go.com
     port: 2101
-    mountpoint: TUOMOUNTPOINT
+    mountpoint: YOURMOUNTPOINT
     password: ""
-  - host: caster-privato.example.com
+  - host: private-caster.example.com
     port: 2101
     mountpoint: BASE1
     password: "password"
 ```
 
-Nota: niente campo `user`. RTKLIB, nel ruolo server/encoder (`str2str -out
-ntrips://...`), si autentica verso il caster solo con la **password del
-mountpoint** (protocollo NTRIP1 `SOURCE <password> <mountpoint>`) — uno
-username non avrebbe alcun effetto (verificato leggendo `reqntrip_s` in
-`src/stream.c` di RTKLIB). Per RTK2go, la password del mountpoint è quella
-scelta al momento della registrazione del mountpoint stesso.
+Note: no `user` field. RTKLIB, in the server/encoder role (`str2str -out
+ntrips://...`), authenticates to the caster only with the **mountpoint
+password** (NTRIP1 protocol `SOURCE <password> <mountpoint>`) — a
+username would have no effect (verified by reading `reqntrip_s` in
+RTKLIB's `src/stream.c`). For RTK2go, the mountpoint password is the one
+chosen when the mountpoint itself was registered.
 
-Se `rtcm_port` e `nmea_port` coincidono, l'add-on invia comunque entrambi i
-set di comandi di configurazione sulla stessa porta (RTCM3 + NMEA GGA/GST
-convivono sullo stesso stream seriale senza problemi per `str2str`, che
-estrae solo i frame RTCM ignorando il resto).
+If `rtcm_port` and `nmea_port` are the same, the add-on still sends both
+sets of configuration commands on the same port (RTCM3 + NMEA GGA/GST
+coexist fine on the same serial stream for `str2str`, which only extracts
+RTCM frames and ignores the rest).
 
-### Più caster NTRIP contemporaneamente
+### Multiple NTRIP casters at the same time
 
-`ntrip_casters` è una lista: dalla UI dell'add-on (scheda Configuration)
-puoi aggiungere o rimuovere voci con i pulsanti +/-, una per ogni caster a
-cui vuoi inviare le correzioni (es. RTK2go + un caster privato + un altro
-ancora). Le voci con `host` vuoto vengono ignorate. Tecnicamente tutte
-condividono una singola istanza `str2str` che legge la seriale una volta
-sola e la smista su più `-out` (uno per caster, più uno per il log raw
-continuo usato dalla campagna PPP) — leggere la stessa porta seriale da
-processi `str2str` separati corromperebbe lo stream, per questo è
-importante che sia sempre un solo processo con più `-out` e non un
-processo per caster.
+`ntrip_casters` is a list: from the add-on UI (Configuration tab) you can
+add or remove entries with the +/- buttons, one for each caster you want
+to send corrections to (e.g. RTK2go + a private caster + another one).
+Entries with an empty `host` are ignored. Technically they all share a
+single `str2str` instance that reads the serial port once and fans it out
+to multiple `-out` targets (one per caster, plus one for the continuous
+raw log used by the PPP campaign) — reading the same serial port from
+separate `str2str` processes would corrupt the stream, which is why it's
+important to always have a single process with multiple `-out` targets
+rather than one process per caster.
 
-**Limite non ovvio, verificato nel codice sorgente di RTKLIB**: `str2str`
-supporta al massimo **4 output totali** (`MAXSTR=5` in `str2str.c`: 1
-input + 4 output — un quinto `-out` viene ignorato in modo silenzioso e
-imprevedibile, non con un errore). Uno di questi slot è sempre occupato
-dal log raw continuo, e uno dal caster locale se `caster_enabled: true`.
-Quindi il numero massimo di caster esterni configurabili è:
-- **3** se `caster_enabled: false`;
-- **2** se `caster_enabled: true`.
+**Non-obvious limit, verified in RTKLIB's source code**: `str2str`
+supports at most **4 outputs total** (`MAXSTR=5` in `str2str.c`: 1 input +
+4 outputs — a fifth `-out` is silently and unpredictably ignored, not with
+an error). One of these slots is always taken by the continuous raw log,
+and one by the local caster if `caster_enabled: true`. So the maximum
+number of configurable external casters is:
+- **3** if `caster_enabled: false`;
+- **2** if `caster_enabled: true`.
 
-Se superi questo limite, l'add-on **non avvia `str2str`** (per evitare il
-comportamento indefinito di RTKLIB) e pubblica il motivo in
-`sensor.errore_di_configurazione` — il resto dell'add-on (skyplot, survey-in,
-ecc.) continua a funzionare normalmente nel frattempo.
+If you exceed this limit, the add-on **won't start `str2str`** (to avoid
+RTKLIB's undefined behavior) and publishes the reason in
+`sensor.configuration_error` — the rest of the add-on (skyplot, survey-in,
+etc.) keeps working normally in the meantime.
 
-### Stato reale delle connessioni ai caster (non solo "il processo è vivo")
+### Real caster connection status (not just "the process is alive")
 
-In precedenza l'unico controllo era che il processo `str2str` fosse in
-esecuzione — se un caster rifiutava l'autenticazione, `str2str` restava
-comunque "vivo" senza che nulla lo segnalasse. Ora l'add-on legge lo
-stderr di `str2str`, che stampa periodicamente (ogni 5s) una riga di
-stato reale per ciascun output (formato verificato compilando e lanciando
-davvero il binario, non dedotto), e la traduce in `sensor.stato_uscita_N`
-(uno per ogni caster/log/relay locale, nello stesso ordine in cui sono
-configurati) + `sensor.diagnostica_str2str` con il testo esatto dell'errore
-quando presente (es. una password sbagliata mostra l'errore del caster,
-non un generico "errore").
+Previously the only check was whether the `str2str` process was running —
+if a caster rejected authentication, `str2str` stayed "alive" regardless,
+with nothing flagging it. Now the add-on reads `str2str`'s stderr, which
+periodically prints (every 5s) a real status line for each output (format
+verified by actually compiling and running the binary, not inferred), and
+translates it into `sensor.output_status_N` (one per configured
+caster/log/local relay, in the same order they're configured) +
+`sensor.str2str_diagnostics` with the exact error text when present (e.g.
+a wrong password shows the caster's own error, not a generic "error").
 
-### Fare da caster per i rover (senza caster esterno)
+### Acting as a caster for rovers (without an external caster)
 
-Di default l'add-on fa solo da **client/uploader** verso i caster esterni
-elencati in `ntrip_casters` (come i servizi `str2str_ntrip_A/B` di
-RTKBase) — non risponde a connessioni in ingresso.
+By default the add-on only acts as a **client/uploader** toward the
+external casters listed in `ntrip_casters` (like RTKBase's
+`str2str_ntrip_A/B` services) — it doesn't respond to incoming
+connections.
 
-Impostando `caster_enabled: true`, l'add-on diventa anche un **NTRIP
-Caster** minimale (handshake NTRIP v1/ICY, con sourcetable e Basic Auth
-opzionale) sulla porta **2101/tcp**, esposta dalla scheda "Network"
-dell'add-on (rimappabile su una porta host diversa da lì). I rover si
-collegano con:
+Setting `caster_enabled: true` makes the add-on also act as a minimal
+**NTRIP Caster** (NTRIP v1/ICY handshake, with sourcetable and optional
+Basic Auth) on port **2101/tcp**, exposed via the add-on's "Network"
+tab (remappable to a different host port from there). Rovers connect
+with:
 
 ```yaml
-caster_mountpoint: "GNSSBASE"   # path a cui i rover si connettono: /GNSSBASE
-caster_user: ""              # vuoto = nessuna autenticazione richiesta
+caster_mountpoint: "GNSSBASE"   # path rovers connect to: /GNSSBASE
+caster_user: ""              # empty = no authentication required
 caster_password: ""
-caster_max_clients: 10       # rover contemporanei accettati, oltre rifiutati con 503
+caster_max_clients: 10       # concurrent rovers accepted, beyond this rejected with 503
 ```
 
-Funziona in parallelo ai caster esterni: tutti condividono la stessa
-istanza `str2str`, che oltre agli `-out ntrips://...` e al log su file
-riceve anche un `-out tcpcli://127.0.0.1:28101` verso un piccolo relay
-interno (`caster.py`), che ridistribuisce i byte RTCM a tutti i rover
-connessi. Il numero di rover connessi è esposto come
-`sensor.rover_connessi_caster_locale`.
+It works in parallel with external casters: they all share the same
+`str2str` instance, which besides the `-out ntrips://...` targets and the
+file log also gets a `-out tcpcli://127.0.0.1:28101` toward a small
+internal relay (`caster.py`), which redistributes the RTCM bytes to all
+connected rovers. The number of connected rovers is exposed as
+`sensor.local_caster_connected_rovers`.
 
-**Hardening incluso**: dopo troppe password sbagliate dallo stesso IP (5
-tentativi in 60s di default) l'IP viene bloccato per 5 minuti, anche se poi
-invia la password corretta — rende poco pratico un bruteforce della
-password del mountpoint. Il numero massimo di rover connessi
-contemporaneamente è configurabile con `caster_max_clients` (default 10):
-oltre il limite, nuove connessioni vengono rifiutate con `503`.
+**Hardening included**: after too many wrong passwords from the same IP
+(5 attempts in 60s by default) the IP gets blocked for 5 minutes, even if
+it then sends the correct password — making a brute-force of the
+mountpoint password impractical. The maximum number of concurrently
+connected rovers is configurable via `caster_max_clients` (default 10):
+beyond the limit, new connections are rejected with `503`.
 
-Limiti noti di questa implementazione minimale (adeguata per un uso
-personale/di piccola scala, non per un caster pubblico ad alto traffico):
-- gestisce un solo mountpoint (quello configurato), non un sourcetable con
-  più stazioni;
-- il blocco anti-bruteforce è per IP e in memoria (si azzera se l'add-on
-  riparte) — non protegge da un attacco distribuito su molti IP, e può
-  bloccare erroneamente più utenti legittimi dietro lo stesso NAT/IP
-  pubblico se sbagliano la password troppe volte;
-- nessuna cifratura TLS (NTRIP in chiaro, come la maggior parte dei caster
-  "semplici" — usa una VPN o un tunnel se serve esporlo oltre la LAN; non
-  implementato in questa passata, possibile follow-up separato).
+Known limits of this minimal implementation (fine for
+personal/small-scale use, not for a high-traffic public caster):
+- it handles a single mountpoint (the configured one), not a sourcetable
+  with multiple stations;
+- the anti-brute-force block is per-IP and in-memory (it resets if the
+  add-on restarts) — it doesn't protect against an attack distributed
+  across many IPs, and may incorrectly block multiple legitimate users
+  behind the same NAT/public IP if they mistype the password too many
+  times;
+- no TLS encryption (plain NTRIP, like most "simple" casters — use a VPN
+  or tunnel if you need to expose it beyond the LAN; not implemented in
+  this pass, possible separate follow-up).
 
-## Cosa succede se l'USB non è collegata (o si scollega)
+## What happens if the USB is not connected (or gets disconnected)
 
-L'add-on è resiliente a USB assente/scollegata, sia all'avvio che durante
-il funzionamento:
+The add-on is resilient to a missing/disconnected USB, both at startup and
+during operation:
 
-- **All'avvio**, se `rtcm_port`/`nmea_port` non esistono ancora (es. l'USB
-  non è ancora enumerata quando l'add-on parte), l'add-on **aspetta**
-  invece di terminare, ritentando ogni 5 secondi finché la porta non
-  compare.
-- **A runtime**, il thread che legge l'NMEA rileva sia la scomparsa della
-  porta (device rimosso) sia un silenzio prolungato (>15s senza alcun
-  dato, anche se la porta esiste ancora): in entrambi i casi richiude la
-  connessione e ritenta periodicamente, senza mai far terminare il
-  processo dell'add-on.
-- Lo stato è visibile in Home Assistant tramite
-  `binary_sensor.dispositivo_connesso` (ON/OFF) e
-  `sensor.ultimo_dato_ricevuto` (timestamp dell'ultimo dato NMEA
-  valido) — puoi costruirci sopra un'automazione (es. notifica se resta
-  OFF per più di N minuti).
-- `str2str` ha già un watchdog separato (`watchdog_str2str`) che lo
-  riavvia se termina inaspettatamente, indipendentemente da questo
-  meccanismo.
+- **At startup**, if `rtcm_port`/`nmea_port` don't exist yet (e.g. the USB
+  isn't enumerated yet when the add-on starts), the add-on **waits**
+  instead of exiting, retrying every 5 seconds until the port appears.
+- **At runtime**, the thread reading NMEA detects both the port
+  disappearing (device removed) and a prolonged silence (>15s with no
+  data, even if the port still exists): in both cases it closes the
+  connection and retries periodically, never letting the add-on process
+  terminate.
+- Status is visible in Home Assistant via
+  `binary_sensor.device_connected` (ON/OFF) and
+  `sensor.last_data_received` (timestamp of the last valid NMEA
+  data) — you can build an automation on top of it (e.g. notify if it
+  stays OFF for more than N minutes).
+- `str2str` already has a separate watchdog (`watchdog_str2str`) that
+  restarts it if it exits unexpectedly, independent of this mechanism.
 
-Nota: non essendoci hardware reale a disposizione in fase di sviluppo,
-questa resilienza è stata verificata simulando l'USB con una pty
-(pseudo-terminale) — assenza iniziale, comparsa a runtime, e
-disconnessione durante il funzionamento — non con un vero adattatore
-USB-seriale. Il comportamento con un vero cavo USB scollegato dovrebbe
-essere equivalente (il kernel rimuove il device node `/dev/ttyUSB0` o
-`/dev/ttyACM0`), ma vale la pena confermarlo al primo test reale.
+Note: since no real hardware was available during development, this
+resilience was verified by simulating the USB with a pty
+(pseudo-terminal) — initial absence, appearing at runtime, and
+disconnection during operation — not with a real USB-serial adapter. The
+behavior with a real disconnected USB cable should be equivalent (the
+kernel removes the `/dev/ttyUSB0` or `/dev/ttyACM0` device node), but it's
+worth confirming on the first real test.
 
-## Survey-In vs Campagna PPP: leggi questo prima di usarlo
+## Survey-In vs PPP Campaign: read this before using it
 
-Ci sono ora **due modi** per fissare la posizione della base, con
-precisione molto diversa:
+There are now **two ways** to fix the base's position, with very
+different precision:
 
-- **Survey-In rapido** (`button.avvia_survey_in`): media di
-  posizioni standalone (single-point, non differenziali) raccolte per
-  `survey_in_duration_sec` secondi. Accuratezza tipica
-  **metrica/sub-metrica**. Utile per test rapidi o installazioni non
-  critiche, non per un riferimento RTK di produzione.
+- **Quick Survey-In** (`button.start_survey_in`): average of
+  standalone (single-point, non-differential) positions collected for
+  `survey_in_duration_sec` seconds. Typical accuracy
+  **meter/sub-meter level**. Useful for quick tests or non-critical
+  installations, not for a production RTK reference.
 
-- **Campagna PPP** (`button.avvia_campagna_ppp`): l'add-on registra
-  già in continuo il flusso RTCM raw su `/data/raw_logs` (con rotazione
-  oraria, retention configurabile via `raw_log_retention_hours`). Avviando
-  la campagna, l'add-on aspetta `ppp_duration_hours` ore, poi elabora
-  automaticamente i file accumulati in quella finestra con lo stesso
-  procedimento di `ppp_process.py` (convbin → download prodotti IGS →
-  rnx2rtkp PPP-static) e applica il risultato come base fissa. Accuratezza
-  attesa **centimetrica** con log di diverse ore (più a lungo registri,
-  meglio converge, specialmente in quota). **Questo è il metodo da usare
-  per l'installazione definitiva**, non il survey-in rapido.
+- **PPP Campaign** (`button.start_ppp_campaign`): the add-on already
+  continuously logs the raw RTCM stream to `/data/raw_logs` (with hourly
+  rotation, retention configurable via `raw_log_retention_hours`).
+  Starting the campaign, the add-on waits `ppp_duration_hours` hours, then
+  automatically processes the files accumulated in that window with the
+  same procedure as `ppp_process.py` (convbin → download IGS products →
+  rnx2rtkp PPP-static) and applies the result as the fixed base. Expected
+  **centimeter-level** accuracy with several hours of logs (the longer you
+  log, the better it converges, especially for height). **This is the
+  method to use for a permanent installation**, not the quick survey-in.
 
-Il risultato della campagna PPP viene anche pubblicato nei campi
-"posizione manuale", cosicché resti visibile/riapplicabile anche in
-seguito tramite `button.applica_posizione_manuale`.
+The PPP campaign result is also published in the "manual position"
+fields, so it stays visible/reapplicable later via
+`button.apply_manual_position`.
 
-### Tempo rimanente e annullamento
+### Remaining time and cancellation
 
-Entrambe le procedure espongono un conto alla rovescia
-(`sensor.survey_in_tempo_rimanente` / `sensor.campagna_ppp_tempo_rimanente`,
-in secondi, aggiornato ogni secondo) e possono essere interrotte con
-`button.annulla_survey_in` / `button.annulla_campagna_ppp`: lo stato passa
-a `cancelled` e **nessuna posizione viene applicata al ricevitore**.
+Both procedures expose a countdown
+(`sensor.survey_in_time_remaining` / `sensor.ppp_campaign_time_remaining`,
+in seconds, updated every second) and can be interrupted with
+`button.cancel_survey_in` / `button.cancel_ppp_campaign`: the state moves
+to `cancelled` and **no position is applied to the receiver**.
 
-Limite noto: per la campagna PPP l'annullamento funziona solo durante la
-fase `logging` (l'attesa che accumula il log raw). Una volta passata alla
-fase `processing` (conversione RINEX + download prodotti IGS + PPP), la
-campagna va a termine — interromperla a metà rischierebbe di lasciare file
-temporanei incoerenti a metà elaborazione. In pratica non è un limite
-stringente: la fase `processing` dura tipicamente pochi minuti contro le
-ore della fase `logging`.
+Known limit: for the PPP campaign, cancellation only works during the
+`logging` phase (the wait that accumulates the raw log). Once it moves to
+the `processing` phase (RINEX conversion + IGS product download + PPP),
+the campaign runs to completion — interrupting it midway would risk
+leaving inconsistent temporary files mid-processing. In practice this
+isn't a strict limitation: the `processing` phase typically lasts a few
+minutes compared to the hours-long `logging` phase.
 
-### Backup della posizione calcolata
+### Backup of the computed position
 
-Ogni volta che una posizione viene fissata (survey-in, campagna PPP, o
-applicazione manuale), l'add-on salva su `/data/position_backup.json` un
-piccolo JSON con **la provenienza**, non solo il valore: lat/lon/height,
-metodo (`survey_in`/`ppp`/`manual`), data/ora, driver del ricevitore usato,
-e parametri specifici del metodo (es. numero di campioni per il survey-in,
-ore/file per la campagna PPP). Lo stesso contenuto è esposto come
-`sensor.ultima_posizione_calcolata` (stato = timestamp, attributi = resto
-dei dati).
+Every time a position is fixed (survey-in, PPP campaign, or manual
+application), the add-on saves a small JSON to `/data/position_backup.json`
+with **the provenance**, not just the value: lat/lon/height, method
+(`survey_in`/`ppp`/`manual`), date/time, receiver driver used, and
+method-specific parameters (e.g. number of samples for survey-in,
+hours/files for the PPP campaign). The same content is exposed as
+`sensor.last_computed_position` (state = timestamp, attributes = the rest
+of the data).
 
-Perché: il ricevitore potrebbe salvare la posizione nella propria
-configurazione interna (se `saveconfig` va a buon fine), ma se il
-container/add-on viene ricreato da zero, senza questo backup l'add-on non
-ricorderebbe più *come* o *quando* è stata calcolata quella posizione — i
-campi "posizione manuale" tornerebbero vuoti finché non li reimposti a
-mano. All'avvio, se il backup esiste, viene ripristinato automaticamente
-nei campi "posizione manuale" (solo in memoria/MQTT: **non** viene
-rimandato al ricevitore in automatico — resta un'azione deliberata tramite
-`button.applica_posizione_manuale`, se decidi di riapplicarlo).
+Why: the receiver might save the position in its own internal
+configuration (if `saveconfig` succeeds), but if the container/add-on is
+recreated from scratch, without this backup the add-on would no longer
+remember *how* or *when* that position was computed — the "manual
+position" fields would come back empty until you reset them by hand. At
+startup, if the backup exists, it's automatically restored into the
+"manual position" fields (memory/MQTT only: it is **not** automatically
+sent back to the receiver — that remains a deliberate action via
+`button.apply_manual_position`, if you decide to reapply it).
 
-Nota: la campagna PPP richiede accesso internet in uscita dal container
-per scaricare i prodotti IGS (SP3/CLK/ANTEX) da `files.igs.org` (pubblico,
-nessuna credenziale richiesta).
+Note: the PPP campaign requires outbound internet access from the
+container to download the IGS products (SP3/CLK/ANTEX) from
+`files.igs.org` (public, no credentials required).
 
-## Test automatizzati (eseguibili fuori da Home Assistant)
+## Automated tests (runnable outside Home Assistant)
 
-Tutta la logica non legata a un vero Supervisor/broker/hardware ha una
-suite `pytest` in `gnss_rtk_base/tests/`, pensata per girare in locale o in
-CI senza bisogno di Home Assistant, Docker, RTKLIB o un ricevitore fisico:
+All the logic not tied to a real Supervisor/broker/hardware has a
+`pytest` suite in `gnss_rtk_base/tests/`, designed to run locally or in CI
+without needing Home Assistant, Docker, RTKLIB, or a physical receiver:
 
 ```bash
 cd gnss_rtk_base
@@ -370,136 +369,139 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-Cosa copre (77 test): parsing NMEA (GGA/GST/GSV/GSA), driver Unicore e
-u-blox (compreso il parsing UBX-ACK/NAK simulando un modulo che risponde
-ACK/NAK), il registro driver, il caster NTRIP locale (sourcetable, auth,
-relay dei byte), la logica PPP che non richiede binari esterni (selezione
-file, parsing date/posizione, download con mirror mockati), le entità MQTT
-Discovery, la resilienza USB (`main.py`) simulata con una pty, il limite
-dei 4 output di `str2str` e la correzione del path `/dev/` — incluso un
-test di regressione per il bug del loop `for caster in ntrip_casters` che
-oscurava il modulo `caster` (vedi changelog di questa conversazione).
+What it covers (77 tests): NMEA parsing (GGA/GST/GSV/GSA), the Unicore and
+u-blox drivers (including UBX-ACK/NAK parsing simulating a module that
+responds ACK/NAK), the driver registry, the local NTRIP caster
+(sourcetable, auth, byte relay), the PPP logic that doesn't require
+external binaries (file selection, date/position parsing, download with
+mocked mirrors), the MQTT Discovery entities, USB resilience (`main.py`)
+simulated with a pty, the `str2str` 4-output limit and the `/dev/` path
+fix — including a regression test for the bug where the `for caster in
+ntrip_casters` loop shadowed the `caster` module (see this project's
+changelog).
 
-Un test (`test_monitor_str2str_status_against_real_str2str_binary`) è
-un'**integrazione reale** con il binario `str2str` vero e proprio (non
-simulato): gira solo se `str2str` è nel `PATH` (`pip install -r
-requirements-dev.txt` non lo installa — va compilato da RTKLIB, vedi
-`Dockerfile`), altrimenti viene automaticamente saltato (`SKIPPED`), così
-la suite resta eseguibile ovunque senza richiedere RTKLIB come
-prerequisito rigido.
+One test (`test_monitor_str2str_status_against_real_str2str_binary`) is a
+**real integration** with the actual `str2str` binary (not simulated): it
+only runs if `str2str` is in `PATH` (`pip install -r
+requirements-dev.txt` doesn't install it — it must be compiled from
+RTKLIB, see `Dockerfile`), otherwise it's automatically skipped
+(`SKIPPED`), so the suite remains runnable anywhere without requiring
+RTKLIB as a hard prerequisite.
 
-Cosa **non** è coperto da questa suite (richiede hardware reale) — vedi
-invece **`../VERIFICA_HARDWARE.md`**:
-- se i comandi Unicore/u-blox vengono davvero applicati da un modulo reale;
-- se `convbin`/`rnx2rtkp` (RTKLIB) si comportano come previsto sui dati di
-  un ricevitore vero (str2str invece è ora testato anche con un binario
-  reale, vedi sopra);
-- se un vero client NTRIP da campo (SW Maps, Emlid Flow, ecc.) si collega
-  correttamente al caster locale, o un vero caster esterno (RTK2go) accetta
-  le correzioni.
+What this suite does **not** cover (requires real hardware) — see instead
+**`../HARDWARE_VERIFICATION.md`**:
+- whether Unicore/u-blox commands are actually applied by a real module;
+- whether `convbin`/`rnx2rtkp` (RTKLIB) behave as expected on data from a
+  real receiver (str2str, on the other hand, is now also tested against a
+  real binary, see above);
+- whether a real field NTRIP client (SW Maps, Emlid Flow, etc.) connects
+  correctly to the local caster, or a real external caster (RTK2go)
+  accepts the corrections.
 
-## Cose da verificare/adattare prima dell'uso reale
+## Things to verify/adapt before real-world use
 
-- **Sintassi comandi del driver selezionato** (`drivers/unicore.py` o
-  `drivers/ublox.py`): per Unicore, `mode base`, `mode rover`,
-  `log ... ontime ...` sono la sintassi più probabile per l'UM982; per
-  u-blox, ID messaggi RTCM3/NMEA e layout TMODE3 vengono dalla
-  documentazione pubblica. In entrambi i casi vanno confermati sul
-  command/interface manual del tuo modulo: controlla i log dell'add-on per
-  eventuali comandi non riconosciuti o non applicati.
-- ~~Path di build di RTKLIB~~ — **risolto e verificato con una build reale
-  dell'immagine Docker su Alpine** (`ghcr.io/home-assistant/amd64-base:3.19`,
-  la stessa base usata da Supervisor), non solo su Debian/glibc: pinnato al
-  tag `v2.4.3-b34`, path corretti (`app/consapp/<tool>/gcc`). Durante il
-  primo build reale su Alpine è emerso un terzo bug (oltre ai due sotto),
-  anch'esso corretto: `rnx2rtkp` si linka anche contro `lib/iers/gcc/iers.a`
-  (libreria Fortran per le correzioni di marea) e contro `-lgfortran` — né
-  il pacchetto `gfortran` era installato, né quella libreria veniva
-  compilata prima. Aggiunto `apk add gfortran` e uno step di build per
-  `lib/iers/gcc` prima di str2str/convbin/rnx2rtkp; l'immagine ora si
-  compila e produce tutti e tre i binari verificati funzionanti dentro il
-  container reale (non solo un test di build isolato).
-- ~~Sintassi `str2str` con più `-out`~~ — **risolto e verificato con un
-  binario reale compilato dal tag pinnato**, non solo letto dall'help
-  text: la sintassi `-in stream [-out stream [-out stream...]]`, i formati
-  `serial://`, `file://`, `ntrips://`, `tcpcli://`, e la riga di stato su
-  stderr (usata ora per `sensor.stato_uscita_N`) sono stati osservati
-  davvero lanciando il binario con una pty come input. Trovati così due
-  bug reali, entrambi corretti: (1) `serial://` non vuole il prefisso
-  `/dev/` (str2str lo prepone da solo — passare il path completo lo
-  raddoppiava, e `str2str` non partiva mai, **su nessuna configurazione
-  precedente di questo add-on**); (2) `str2str` accetta **al massimo 4
-  `-out` totali** (`MAXSTR=5` nel sorgente), limite ora imposto
-  esplicitamente (vedi sopra). Non ancora verificati: un caster reale in
-  produzione (RTK2go o simile) — solo un caster locale/irraggiungibile
-  simulato — e la rotazione oraria del file di log (`%Y%m%d%h`), che non è
-  stata necessaria attivare durante questa verifica.
-- **RTKLIB implementa già un ruolo di caster nativo**, scoperto leggendo
-  il sorgente durante questa verifica: `str2str -out ntripc://[user:passwd@][:port]/mntpnt[:srctbl]`
-  fa esattamente quello che fa `caster.py` in questo add-on (accetta
-  connessioni multiple, HTTP/1.1, sourcetable, autenticazione), a
-  differenza di quanto affermato in una fase precedente di questo
-  progetto (si era concluso — erroneamente — che RTKLIB non supportasse
-  affatto il ruolo di caster). Non è stato ancora valutato se sostituire
-  `caster.py` con questa funzionalità nativa: il vantaggio sarebbe meno
-  codice custom da mantenere, lo svantaggio è perdere il conteggio dei
-  rover connessi che oggi `caster.py` espone via MQTT (`str2str` non pare
-  offrire un modo diretto di riportare quel dato all'esterno).
-- **Spazio disco**: il log raw continuo in `/data/raw_logs` cresce con il
-  tempo fino alla retention configurata (`raw_log_retention_hours`, default
-  72h). Dimensiona la retention in base allo spazio disponibile sull'host.
-- ~~`init: false` mancante in `config.yaml`~~ — **risolto**, trovato solo
-  durante il primo deploy reale su un'istanza Home Assistant: senza questo
-  campo (assente = `true` di default), Supervisor avvolge il container col
-  proprio init, che diventa PID 1 al posto di `/init` (s6-overlay) già
-  presente nell'immagine base, causando
-  `s6-overlay-suexec: fatal: can only run as pid 1` all'avvio. Non
-  riproducibile con `docker build`/`docker run` diretti (solo con
-  l'orchestrazione reale di Supervisor) — un limite della verifica in
-  questa cartella: build e avvio locali confermano che l'immagine si
-  compila e il codice Python funziona, ma non tutte le convenzioni
-  specifiche di Supervisor (come questa).
-- ~~Crash se il broker MQTT non è ancora pronto~~ — **risolto**, trovato
-  nello stesso deploy reale: `self.mqtt.connect()` falliva con
-  `ConnectionRefusedError` non gestita se nessuna integrazione MQTT è
-  collegata a un broker, terminando l'intero add-on. Ora ritenta ogni 10s
-  con un messaggio chiaro nei log, verificato con una build+esecuzione
-  reale del container senza MQTT disponibile.
-- **Skyplot, satelliti "usati"**: il flag `used` confronta i PRN letti da
-  GSA con quelli visti in GSV senza distinguere la costellazione (la
-  numerazione NMEA può sovrapporsi tra costellazioni in ricevitori
-  multi-GNSS). Per una visualizzazione indicativa va bene; se noti
-  incongruenze evidenti, verifica come l'UM982 numera i satelliti nei GSA
-  multi-costellazione e adatta `nmea.parse_gsa`/`state.py` di conseguenza.
-- **Caster locale**: la logica di handshake/sourcetable/auth/relay è stata
-  testata con un client socket grezzo (sourcetable, 401, ICY 200 OK, e
-  inoltro dei byte funzionano), ma non ancora con un vero client NTRIP da
-  campo (es. SW Maps, Emlid Flow, u-center): se un'app rover non si
-  connette, verifica con Wireshark/tcpdump cosa si aspetta esattamente nel
-  primo scambio (alcune app inviano `Ntrip-Version: Ntrip/2.0` o intestazioni
-  aggiuntive che questa implementazione minimale ignora).
+- **Selected driver's command syntax** (`drivers/unicore.py` or
+  `drivers/ublox.py`): for Unicore, `mode base`, `mode rover`,
+  `log ... ontime ...` are the most likely syntax for the UM982; for
+  u-blox, the RTCM3/NMEA message IDs and TMODE3 layout come from public
+  documentation. In both cases they need to be confirmed against your
+  module's command/interface manual: check the add-on logs for any
+  unrecognized or unapplied commands.
+- ~~RTKLIB build paths~~ — **fixed and verified with a real Docker image
+  build on Alpine** (`ghcr.io/home-assistant/amd64-base:3.19`, the same
+  base used by Supervisor), not just on Debian/glibc: pinned to tag
+  `v2.4.3-b34`, correct paths (`app/consapp/<tool>/gcc`). During the first
+  real build on Alpine, a third bug surfaced (besides the two below), also
+  fixed: `rnx2rtkp` also links against `lib/iers/gcc/iers.a` (a Fortran
+  library for tidal corrections) and against `-lgfortran` — neither was
+  the `gfortran` package installed, nor was that library built beforehand.
+  Added `apk add gfortran` and a build step for `lib/iers/gcc` before
+  str2str/convbin/rnx2rtkp; the image now builds and produces all three
+  binaries, verified working inside the real container (not just an
+  isolated build test).
+- ~~`str2str` syntax with multiple `-out`~~ — **fixed and verified with a
+  real binary compiled from the pinned tag**, not just read from the help
+  text: the `-in stream [-out stream [-out stream...]]` syntax, the
+  `serial://`, `file://`, `ntrips://`, `tcpcli://` formats, and the status
+  line on stderr (now used for `sensor.output_status_N`) were actually
+  observed by launching the binary with a pty as input. This found two
+  real bugs, both fixed: (1) `serial://` doesn't want the `/dev/` prefix
+  (str2str prepends it itself — passing the full path duplicated it, and
+  `str2str` never started, **on every previous configuration of this
+  add-on**); (2) `str2str` accepts **at most 4 total `-out`
+  targets** (`MAXSTR=5` in the source), a limit now enforced explicitly
+  (see above). Not yet verified: a real production caster (RTK2go or
+  similar) — only a simulated local/unreachable caster — and the log
+  file's hourly rotation (`%Y%m%d%h`), which wasn't triggered during this
+  verification.
+- **RTKLIB already implements a native caster role**, discovered by
+  reading the source during this verification: `str2str -out
+  ntripc://[user:passwd@][:port]/mntpnt[:srctbl]` does exactly what
+  `caster.py` does in this add-on (accepts multiple connections, HTTP/1.1,
+  sourcetable, authentication), contrary to what was claimed in an
+  earlier phase of this project (it had been concluded — incorrectly —
+  that RTKLIB didn't support the caster role at all). It hasn't been
+  evaluated yet whether to replace `caster.py` with this native
+  functionality: the advantage would be less custom code to maintain, the
+  disadvantage is losing the connected-rovers count that `caster.py`
+  currently exposes via MQTT (`str2str` doesn't seem to offer a direct way
+  to report that externally).
+- **Disk space**: the continuous raw log in `/data/raw_logs` grows over
+  time up to the configured retention (`raw_log_retention_hours`, default
+  72h). Size the retention according to the available space on the host.
+- ~~Missing `init: false` in `config.yaml`~~ — **fixed**, found only
+  during the first real deploy on a Home Assistant instance: without this
+  field (absent = `true` by default), Supervisor wraps the container with
+  its own init, which becomes PID 1 instead of `/init` (s6-overlay)
+  already present in the base image, causing
+  `s6-overlay-suexec: fatal: can only run as pid 1` at startup. Not
+  reproducible with direct `docker build`/`docker run` (only with
+  Supervisor's real orchestration) — a limitation of the verification
+  done in this project: local builds and runs confirm the image builds
+  and the Python code works, but not every Supervisor-specific convention
+  (like this one).
+- ~~Crash if the MQTT broker isn't ready yet~~ — **fixed**, found in the
+  same real deploy: `self.mqtt.connect()` failed with an unhandled
+  `ConnectionRefusedError` if no MQTT integration is connected to a
+  broker, terminating the whole add-on. It now retries every 10s with a
+  clear message in the logs, verified with a real build+run of the
+  container without MQTT available.
+- **Skyplot, "used" satellites**: the `used` flag compares PRNs read from
+  GSA with those seen in GSV without distinguishing the constellation
+  (NMEA numbering can overlap between constellations on multi-GNSS
+  receivers). Fine for an indicative display; if you notice obvious
+  inconsistencies, check how the UM982 numbers satellites in
+  multi-constellation GSA sentences and adapt
+  `nmea.parse_gsa`/`state.py` accordingly.
+- **Local caster**: the handshake/sourcetable/auth/relay logic has been
+  tested with a raw socket client (sourcetable, 401, ICY 200 OK, and byte
+  forwarding all work), but not yet with a real field NTRIP client (e.g.
+  SW Maps, Emlid Flow, u-center): if a rover app doesn't connect, check
+  with Wireshark/tcpdump exactly what the client expects in the first
+  exchange (some apps send `Ntrip-Version: Ntrip/2.0` or additional
+  headers that this minimal implementation ignores).
 
-## File
+## Files
 
-- `repository.yaml` — manifest del repository per lo store add-on.
-- `gnss_rtk_base/config.yaml` — manifest dell'add-on (opzioni, architetture).
-- `gnss_rtk_base/icon.png` / `logo.png` — icona mostrata nell'Add-on Store.
-- `gnss_rtk_base/build.yaml` — immagini base per arch.
-- `gnss_rtk_base/Dockerfile` — build immagine (RTKLIB da sorgente + Python).
-- `gnss_rtk_base/run.sh` — entrypoint (bashio, credenziali MQTT da Supervisor).
-- `gnss_rtk_base/main.py` — logica applicativa (str2str, MQTT, survey-in, campagna PPP).
-- `gnss_rtk_base/drivers/` — driver per ricevitore (`base.py` contratto,
-  `unicore.py`, `ublox.py`, `__init__.py` registro); vedi "Supporto
-  multi-ricevitore" sopra per come aggiungerne uno nuovo.
-- `gnss_rtk_base/nmea.py` — parsing GGA/GST/GSV/GSA (standard NMEA-0183, non specifico di un ricevitore).
-- `gnss_rtk_base/ppp.py` — elaborazione PPP-static (porting di `ppp_process.py`).
-- `gnss_rtk_base/state.py` — stato condiviso in memoria (satelliti/fix) tra il monitor NMEA e il web server.
-- `gnss_rtk_base/webui.py` — server HTTP minimale (stdlib) per il pannello skyplot via Ingress.
-- `gnss_rtk_base/www/index.html` — pagina skyplot (canvas, nessuna dipendenza esterna).
-- `gnss_rtk_base/mqtt_discovery.py` — helper per le entità MQTT Discovery.
-- `gnss_rtk_base/caster.py` — mini NTRIP Caster locale opzionale (`caster_enabled`).
-- `gnss_rtk_base/position_backup.py` — backup su disco della posizione calcolata, con provenienza.
-- `gnss_rtk_base/requirements-dev.txt` — dipendenze extra per i test (`pytest`).
-- `gnss_rtk_base/pytest.ini` — configurazione pytest (`testpaths = tests`).
-- `gnss_rtk_base/tests/` — suite di test automatizzati, eseguibile fuori
-  da Home Assistant (vedi sezione "Test automatizzati" sopra).
+- `repository.yaml` — repository manifest for the add-on store.
+- `gnss_rtk_base/config.yaml` — add-on manifest (options, architectures).
+- `gnss_rtk_base/icon.png` / `logo.png` — icon shown in the Add-on Store.
+- `gnss_rtk_base/build.yaml` — base images per architecture.
+- `gnss_rtk_base/Dockerfile` — image build (RTKLIB from source + Python).
+- `gnss_rtk_base/run.sh` — entrypoint (bashio, MQTT credentials from Supervisor).
+- `gnss_rtk_base/main.py` — application logic (str2str, MQTT, survey-in, PPP campaign).
+- `gnss_rtk_base/drivers/` — per-receiver drivers (`base.py` contract,
+  `unicore.py`, `ublox.py`, `__init__.py` registry); see "Multi-receiver
+  support" above for how to add a new one.
+- `gnss_rtk_base/nmea.py` — GGA/GST/GSV/GSA parsing (standard NMEA-0183, not receiver-specific).
+- `gnss_rtk_base/ppp.py` — PPP-static processing (port of `ppp_process.py`).
+- `gnss_rtk_base/state.py` — in-memory shared state (satellites/fix) between the NMEA monitor and the web server.
+- `gnss_rtk_base/webui.py` — minimal HTTP server (stdlib) for the skyplot panel via Ingress.
+- `gnss_rtk_base/www/index.html` — skyplot page (canvas, no external dependencies).
+- `gnss_rtk_base/mqtt_discovery.py` — helper for MQTT Discovery entities.
+- `gnss_rtk_base/caster.py` — optional local mini NTRIP Caster (`caster_enabled`).
+- `gnss_rtk_base/position_backup.py` — on-disk backup of the computed position, with provenance.
+- `gnss_rtk_base/requirements-dev.txt` — extra dependencies for tests (`pytest`).
+- `gnss_rtk_base/pytest.ini` — pytest configuration (`testpaths = tests`).
+- `gnss_rtk_base/tests/` — automated test suite, runnable outside
+  Home Assistant (see the "Automated tests" section above).

@@ -1,6 +1,6 @@
-"""Server HTTP minimale per la pagina skyplot, pensato per girare dietro
-l'Ingress di Home Assistant (path dinamico, quindi la pagina usa solo URL
-relativi). Nessuna dipendenza esterna: solo http.server della stdlib."""
+"""Minimal HTTP server for the skyplot page, designed to run behind Home
+Assistant Ingress (dynamic path, so the page only uses relative URLs). No
+external dependencies: just http.server from the stdlib."""
 
 import json
 import mimetypes
@@ -13,7 +13,7 @@ WWW_DIR = Path(__file__).parent / "www"
 def make_handler(state, fix_label_fn):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
-            pass  # silenzia il log di default di BaseHTTPRequestHandler
+            pass  # silence BaseHTTPRequestHandler's default logging
 
         def do_GET(self):
             path = self.path.split("?")[0]
@@ -27,7 +27,7 @@ def make_handler(state, fix_label_fn):
                 self.end_headers()
                 self.wfile.write(payload)
             else:
-                # eventuali altri asset statici sotto www/
+                # any other static assets under www/
                 safe_path = (WWW_DIR / path.lstrip("/")).resolve()
                 if WWW_DIR in safe_path.parents and safe_path.exists():
                     self._serve_file(safe_path)
@@ -51,5 +51,5 @@ def make_handler(state, fix_label_fn):
 
 def start_webserver(state, fix_label_fn, port):
     server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(state, fix_label_fn))
-    print(f"[webui] skyplot disponibile sulla porta {port}", flush=True)
+    print(f"[webui] skyplot available on port {port}", flush=True)
     server.serve_forever()

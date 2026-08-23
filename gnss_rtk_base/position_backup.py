@@ -1,11 +1,11 @@
 """
-Backup su disco della posizione fissa calcolata (survey-in, campagna PPP,
-o inserimento manuale), con provenienza: metodo, data/ora, e parametri
-usati. Serve a non perdere questa informazione se il container/add-on
-viene ricreato — il ricevitore potrebbe aver salvato la posizione nella
-propria configurazione interna (se il comando "saveconfig" è andato a
-buon fine), ma qui teniamo una copia indipendente e leggibile, con il
-"perché" della posizione, non solo il valore.
+On-disk backup of the computed fixed position (survey-in, PPP campaign,
+or manual entry), with provenance: method, timestamp, and parameters
+used. This avoids losing this information if the container/add-on gets
+recreated — the receiver may have saved the position in its own internal
+configuration (if the "saveconfig" command succeeded), but here we keep
+an independent, human-readable copy including the "why" of the position,
+not just the value.
 """
 
 import datetime as dt
@@ -16,8 +16,8 @@ DEFAULT_PATH = Path("/data/position_backup.json")
 
 
 def save(lat, lon, height, method, receiver_type, path=None, **extra):
-    """method: 'survey_in' | 'ppp' | 'manual'. extra: metadati specifici
-    del metodo (es. num_samples, duration_hours) da conservare per contesto."""
+    """method: 'survey_in' | 'ppp' | 'manual'. extra: method-specific
+    metadata (e.g. num_samples, duration_hours) kept for context."""
     data = {
         "lat": lat,
         "lon": lon,
@@ -27,9 +27,9 @@ def save(lat, lon, height, method, receiver_type, path=None, **extra):
         "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         **extra,
     }
-    # path=None (non DEFAULT_PATH) come default: così un monkeypatch di
-    # position_backup.DEFAULT_PATH nei test ha effetto anche su chiamate
-    # che non specificano il path esplicitamente.
+    # path=None (not DEFAULT_PATH) as the default: this way a monkeypatch
+    # of position_backup.DEFAULT_PATH in tests also affects calls that
+    # don't specify the path explicitly.
     Path(path if path is not None else DEFAULT_PATH).write_text(json.dumps(data, indent=2))
     return data
 

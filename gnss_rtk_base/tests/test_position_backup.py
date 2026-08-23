@@ -16,12 +16,12 @@ def test_save_and_load_roundtrip(tmp_path):
 
 
 def test_load_returns_none_if_missing(tmp_path):
-    assert position_backup.load(path=tmp_path / "non_esiste.json") is None
+    assert position_backup.load(path=tmp_path / "does_not_exist.json") is None
 
 
 def test_load_returns_none_on_corrupt_file(tmp_path):
-    path = tmp_path / "corrotto.json"
-    path.write_text("{non e' json valido")
+    path = tmp_path / "corrupt.json"
+    path.write_text("{not valid json")
     assert position_backup.load(path=path) is None
 
 

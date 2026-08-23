@@ -95,7 +95,7 @@ def test_auth_rate_limiter_blocks_after_max_failures():
     for _ in range(2):
         limiter.record_failure("1.2.3.4")
         assert not limiter.is_blocked("1.2.3.4")
-    limiter.record_failure("1.2.3.4")  # terzo fallimento: raggiunge la soglia
+    limiter.record_failure("1.2.3.4")  # third failure: reaches the threshold
     assert limiter.is_blocked("1.2.3.4")
 
 
@@ -115,10 +115,10 @@ def test_auth_rate_limiter_ignores_other_ips():
 
 
 def test_repeated_failed_auth_gets_blocked_end_to_end():
-    """Simula un tentativo di bruteforce: dopo max_failures password
-    sbagliate dalla stessa connessione (stesso IP, 127.0.0.1 nei test),
-    ulteriori tentativi vengono rifiutati immediatamente, anche con la
-    password corretta nel frattempo."""
+    """Simulates a brute-force attempt: after max_failures wrong
+    passwords from the same connection (same IP, 127.0.0.1 in tests),
+    further attempts are rejected immediately, even with the correct
+    password in the meantime."""
     limiter = caster.AuthRateLimiter(max_failures=2, window_s=10, block_duration_s=5)
     _, _, caster_port = _start_caster(mountpoint="GNSSBASE", user="user", password="pass", limiter=limiter)
 
@@ -126,7 +126,7 @@ def test_repeated_failed_auth_gets_blocked_end_to_end():
         resp = _auth_get(caster_port, "GNSSBASE", user="user", password="wrong")
         assert b"401" in resp
 
-    # ora l'IP e' bloccato: anche la password corretta viene rifiutata
+    # the IP is now blocked: even the correct password gets rejected
     resp = _auth_get(caster_port, "GNSSBASE", user="user", password="pass")
     assert b"401" in resp
 

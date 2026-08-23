@@ -1,5 +1,5 @@
-"""Parsing minimale delle frasi NMEA GGA/GST/GSV/GSA — standard NMEA-0183,
-valido per qualsiasi ricevitore GNSS (non specifico di un driver)."""
+"""Minimal parsing of NMEA GGA/GST/GSV/GSA sentences — standard NMEA-0183,
+valid for any GNSS receiver (not specific to a driver)."""
 
 FIX_QUALITY_LABELS = {
     0: "No Fix",
@@ -65,10 +65,11 @@ CONSTELLATION_BY_TALKER = {
 
 
 def parse_gsv(line):
-    """Ritorna una lista di satelliti da una frase GSV (uno dei possibili
-    sottogruppi da 4 inviati per sentenza): [{prn, constellation, elevation,
-    azimuth, snr}, ...]. Vanno accumulati nel tempo lato chiamante, perché
-    una costellazione intera è distribuita su più sentenze GSV."""
+    """Returns a list of satellites from a GSV sentence (one of the
+    possible groups of 4 sent per sentence): [{prn, constellation,
+    elevation, azimuth, snr}, ...]. Must be accumulated over time by the
+    caller, because a full constellation is spread across several GSV
+    sentences."""
     line = line.strip()
     if not line.startswith("$") or "GSV" not in line[1:6]:
         return []
@@ -79,7 +80,7 @@ def parse_gsv(line):
         return []
     constellation = CONSTELLATION_BY_TALKER.get(talker, talker)
     sats = []
-    # Dal campo 4 in poi, gruppi di 4: prn, elevazione, azimuth, snr
+    # From field 4 onward, groups of 4: prn, elevation, azimuth, snr
     for i in range(4, len(parts) - 3, 4):
         prn, elev, az, snr = parts[i:i + 4]
         if not prn:
@@ -98,8 +99,9 @@ def parse_gsv(line):
 
 
 def parse_gsa(line):
-    """Ritorna l'insieme dei PRN usati nella soluzione corrente (numerazione
-    NMEA, non distinta per costellazione) più i DOP, da una frase GSA."""
+    """Returns the set of PRNs used in the current solution (NMEA
+    numbering, not distinguished by constellation) plus the DOP values,
+    from a GSA sentence."""
     line = line.strip()
     if not line.startswith("$") or "GSA" not in line[1:6]:
         return None

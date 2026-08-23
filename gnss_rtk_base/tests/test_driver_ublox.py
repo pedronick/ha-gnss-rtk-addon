@@ -43,9 +43,10 @@ def test_tmode3_payload_is_40_bytes():
 
 
 def _fake_ublox_module(master_fd, nak_first_rtcm_cfg=True):
-    """Simula un modulo u-blox: risponde ACK a ogni comando, tranne al
-    primo UBX-CFG-MSG con classe RTCM (0xF5), a cui risponde NAK, per
-    verificare che il driver distingua correttamente i due casi."""
+    """Simulates a u-blox module: replies ACK to every command, except to
+    the first UBX-CFG-MSG with RTCM class (0xF5), to which it replies
+    NAK, to verify that the driver correctly distinguishes the two
+    cases."""
     state = {"first_f5": nak_first_rtcm_cfg}
 
     def _run():
@@ -101,9 +102,9 @@ def test_configure_rtcm_detects_ack_and_nak(fake_serial_pair, capsys):
 
 
 def test_read_ack_returns_none_without_reply(fake_serial_pair):
-    """Se il modulo non risponde affatto (es. baud rate errato), il driver
-    non deve bloccarsi indefinitamente: deve restituire None entro il
-    timeout previsto."""
+    """If the module doesn't respond at all (e.g. wrong baud rate), the
+    driver must not block indefinitely: it must return None within the
+    expected timeout."""
     import serial
 
     master_fd, slave_path = fake_serial_pair

@@ -13,13 +13,13 @@ def test_get_driver_returns_expected_module():
 
 
 def test_get_driver_raises_on_unknown_name():
-    with pytest.raises(ValueError, match="non supportato"):
-        drivers.get_driver("modulo_inesistente")
+    with pytest.raises(ValueError, match="Unsupported"):
+        drivers.get_driver("nonexistent_module")
 
 
 def test_every_driver_exposes_the_required_contract():
     required = ("configure_rtcm", "configure_nmea", "set_rover_mode", "set_fixed_base")
     for name, module in drivers.DRIVERS.items():
         for fn_name in required:
-            assert hasattr(module, fn_name), f"{name} manca di {fn_name}"
+            assert hasattr(module, fn_name), f"{name} is missing {fn_name}"
             assert callable(getattr(module, fn_name))

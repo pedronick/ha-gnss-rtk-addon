@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-RTK Base Station add-on: legge un ricevitore GNSS RTK via seriale (driver
-selezionabile con receiver_type, vedi drivers/), spinge le correzioni RTCM
-come server NTRIP (RTKLIB str2str) verso uno o più caster, ed espone
-stato/controlli in Home Assistant via MQTT Discovery.
+RTK Base Station add-on: reads a GNSS RTK receiver over serial (driver
+selectable via receiver_type, see drivers/), pushes RTCM corrections as
+an NTRIP server (RTKLIB str2str) to one or more casters, and exposes
+status/controls in Home Assistant via MQTT Discovery.
 """
 
 import datetime as dt
@@ -38,10 +38,10 @@ SERIAL_RETRY_INTERVAL_S = 5
 SERIAL_SILENCE_TIMEOUT_S = 15
 MQTT_RETRY_INTERVAL_S = 10
 
-# Formato della riga di stato di str2str (verificato con un binario reale):
+# str2str status line format (verified with a real binary):
 # "2024/01/15 12:34:56 [CC---]        425 B     699 bps (1) send error (111) "
 STR2STR_STATUS_RE = re.compile(r"\[(?P<statuses>[^\]]*)\]\s+\d+\s+B\s+(?P<bps>-?\d+)\s+bps\s*(?P<msg>.*)$")
-STR2STR_STATUS_LABELS = {"E": "Errore", "-": "Chiuso", "W": "In attesa", "C": "Connesso"}
+STR2STR_STATUS_LABELS = {"E": "Error", "-": "Closed", "W": "Waiting", "C": "Connected"}
 
 
 def load_options():
@@ -50,12 +50,12 @@ def load_options():
 
 
 def wait_for_serial_port(path, label):
-    """Blocca finché il device seriale non esiste. Utile sia all'avvio
-    (l'USB potrebbe non essere ancora enumerata) sia dopo uno scollegamento."""
+    """Blocks until the serial device exists. Useful both at startup (the
+    USB might not be enumerated yet) and after a disconnection."""
     first = True
     while not os.path.exists(path):
         if first:
-            print(f"[main] {label}: porta {path} non trovata, in attesa che compaia...", flush=True)
+            print(f"[main] {label}: port {path} not found, waiting for it to appear...", flush=True)
             first = False
         time.sleep(SERIAL_RETRY_INTERVAL_S)
 
@@ -112,14 +112,14 @@ class App:
         if connected:
             self.mqtt.publish(f"{BASE}/last_seen/state",
                                dt.datetime.now(dt.timezone.utc).isoformat(), retain=True)
-        status = "connesso" if connected else f"NON connesso ({reason})" if reason else "NON connesso"
-        print(f"[main] stato dispositivo: {status}", flush=True)
+        status = "connected" if connected else f"NOT connected ({reason})" if reason else "NOT connected"
+        print(f"[main] device status: {status}", flush=True)
 
     def configure_receiver(self):
-        """Configura RTCM e NMEA sul modulo, aspettando che le porte
-        seriali esistano (utile se l'USB non è ancora enumerata all'avvio
-        dell'add-on) e ritentando in caso di errore invece di far crashare
-        l'intero add-on."""
+        """Configures RTCM and NMEA on the module, waiting for the serial
+        ports to exist (useful if the USB is not yet enumerated when the
+        add-on starts) and retrying on error instead of crashing the
+        whole add-on."""
         for port, label in ((self.rtcm_port, "RTCM"), (self.nmea_port, "NMEA")):
             wait_for_serial_port(port, label)
 
@@ -132,7 +132,7 @@ class App:
                 self.driver.configure_nmea(self.nmea_port, self.baud)
                 return
             except (serial.SerialException, OSError) as e:
-                print(f"[main] errore configurando il modulo ({e}), ritento in "
+                print(f"[main] error configuring the module ({e}), retrying in "
                       f"{SERIAL_RETRY_INTERVAL_S}s...", flush=True)
                 time.sleep(SERIAL_RETRY_INTERVAL_S)
 
@@ -140,69 +140,73 @@ class App:
         return [c for c in self.ntrip_casters if c.get("host")]
 
     def output_stream_plan(self):
-        """Etichette degli -out passati a str2str, nello stesso ordine in
-        cui vengono aggiunti da build_str2str_cmd(). Servono per
-        interpretare la stringa di stato a 5 caratteri che str2str stampa
-        periodicamente su stderr: indice 0 = input seriale, indice i =
-        l'i-esimo -out in questo stesso ordine (verificato leggendo
-        strsvrstat()/str2str.c di RTKLIB e con un binario compilato)."""
+        """Labels for the -out streams passed to str2str, in the same
+        order in which they are added by build_str2str_cmd(). Used to
+        interpret the 5-character status string that str2str prints
+        periodically on stderr: index 0 = serial input, index i = the
+        i-th -out in this same order (verified by reading
+        strsvrstat()/str2str.c in RTKLIB and with a compiled binary)."""
         labels = [f"{c['host']}:{c['port']}/{c.get('mountpoint', '')}" for c in self.active_casters()]
-        labels.append("log raw")
+        labels.append("raw log")
         if self.caster_enabled:
-            labels.append("caster locale")
+            labels.append("local caster")
         return labels
 
     def validate_stream_budget(self):
-        """RTKLIB limita str2str a MAXSTR=5 stream totali (1 input + 4
-        output, verificato nel sorgente app/consapp/str2str/str2str.c):
-        oltre il quarto -out, gli argomenti in eccesso vengono ignorati in
-        modo silenzioso e imprevedibile, non con un errore chiaro. Meglio
-        fallire rumorosamente qui che scoprirlo a runtime."""
+        """RTKLIB limits str2str to MAXSTR=5 total streams (1 input + 4
+        outputs, verified in the app/consapp/str2str/str2str.c source):
+        beyond the fourth -out, extra arguments are silently and
+        unpredictably ignored, not with a clear error. Better to fail
+        loudly here than discover it at runtime."""
         needed = len(self.output_stream_plan())
         if needed > 4:
             raise ValueError(
-                f"Troppi output configurati per str2str: {needed} "
-                f"({len(self.active_casters())} caster NTRIP + 1 log raw"
-                f"{' + 1 caster locale' if self.caster_enabled else ''}), "
-                f"il massimo supportato da RTKLIB è 4. Riduci il numero di "
-                f"voci in ntrip_casters oppure disabilita caster_enabled."
+                f"Too many outputs configured for str2str: {needed} "
+                f"({len(self.active_casters())} NTRIP caster(s) + 1 raw log"
+                f"{' + 1 local caster' if self.caster_enabled else ''}), "
+                f"the maximum supported by RTKLIB is 4. Reduce the number "
+                f"of entries in ntrip_casters or disable caster_enabled."
             )
 
     def build_str2str_cmd(self):
-        """Un'unica istanza str2str legge la seriale una sola volta e la
-        smista su più -out (uno per caster + uno per il log raw continuo).
-        Leggere la stessa porta seriale da più processi indipendenti
-        corromperebbe lo stream: str2str supporta nativamente più -out
-        proprio per questo caso d'uso (max 4, vedi validate_stream_budget)."""
-        # str2str usa serial://<nome_device>, senza "/dev/": lo antepone lui
-        # stesso internamente (openserial() in src/stream.c fa sprintf(dev,
-        # "/dev/%s", port)). Passare "/dev/ttyUSB0" produrrebbe
-        # "/dev//dev/ttyUSB0", che non esiste: str2str non si avvierebbe mai.
-        # Verificato compilando e lanciando davvero str2str con un path
-        # completo (fallisce) e con il nome nudo (funziona).
+        """A single str2str instance reads the serial port only once and
+        fans it out to multiple -out targets (one per caster + one for
+        the continuous raw log). Reading the same serial port from
+        multiple independent processes would corrupt the stream: str2str
+        natively supports multiple -out targets exactly for this use case
+        (max 4, see validate_stream_budget)."""
+        # str2str uses serial://<device_name>, without "/dev/": it
+        # prepends that itself internally (openserial() in src/stream.c
+        # does sprintf(dev, "/dev/%s", port)). Passing "/dev/ttyUSB0"
+        # would produce "/dev//dev/ttyUSB0", which doesn't exist: str2str
+        # would never start. Verified by actually compiling and running
+        # str2str with a full path (fails) and with the bare name (works).
         str2str_port = self.rtcm_port.removeprefix("/dev/")
         cmd = ["str2str", "-in", f"serial://{str2str_port}:{self.baud}"]
         for caster_cfg in self.active_casters():
-            # Sintassi RTKLIB per un output NTRIP server: "ntrips://[:passwd@]addr[:port]/mntpnt".
-            # Non esiste un campo utente: str2str, nel ruolo di server/encoder,
-            # invia solo la password del mountpoint (protocollo NTRIP1 "SOURCE
-            # <password> <mountpoint>" — verificato in src/stream.c/reqntrip_s
-            # di RTKLIB, che non usa mai lo username per questo ruolo).
+            # RTKLIB syntax for an NTRIP server output: "ntrips://[:passwd@]addr[:port]/mntpnt".
+            # There's no user field: str2str, in the server/encoder role,
+            # only sends the mountpoint password (NTRIP1 protocol "SOURCE
+            # <password> <mountpoint>" — verified in RTKLIB's
+            # src/stream.c/reqntrip_s, which never uses the username for
+            # this role).
             out = (f"ntrips://:{caster_cfg.get('password', '')}"
                    f"@{caster_cfg['host']}:{caster_cfg['port']}/{caster_cfg.get('mountpoint', '')}")
             cmd += ["-out", out]
-        # Log raw continuo, con rotazione oraria automatica (str2str
-        # riconosce i tag %Y%m%d%h nel path e crea un nuovo file ogni ora).
+        # Continuous raw log, with automatic hourly rotation (str2str
+        # recognizes the %Y%m%d%h tags in the path and creates a new file
+        # every hour).
         cmd += ["-out", f"file://{RAW_LOG_DIR}/gnssbase_%Y%m%d%h.rtcm3"]
         if self.caster_enabled:
-            # str2str si collega al nostro relay interno (caster.py) e ci
-            # inoltra lo stream, che ridistribuiamo ai rover connessi.
+            # str2str connects to our internal relay (caster.py) and
+            # forwards the stream to us, which we re-distribute to
+            # connected rovers.
             cmd += ["-out", f"tcpcli://127.0.0.1:{caster.INTERNAL_RELAY_PORT}"]
         return cmd
 
     def start_str2str(self):
         cmd = self.build_str2str_cmd()
-        print("[main] avvio str2str:", " ".join(cmd), flush=True)
+        print("[main] starting str2str:", " ".join(cmd), flush=True)
         self.str2str_proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, bufsize=1)
         threading.Thread(target=self.monitor_str2str_status, args=(self.str2str_proc,), daemon=True).start()
 
@@ -210,21 +214,21 @@ class App:
         while True:
             time.sleep(10)
             if self.str2str_proc is not None and self.str2str_proc.poll() is not None:
-                print("[main] str2str terminato inaspettatamente, riavvio...", flush=True)
+                print("[main] str2str terminated unexpectedly, restarting...", flush=True)
                 self.str2str_proc = subprocess.Popen(
                     self.str2str_proc.args, stderr=subprocess.PIPE, text=True, bufsize=1)
                 threading.Thread(target=self.monitor_str2str_status, args=(self.str2str_proc,), daemon=True).start()
 
     def monitor_str2str_status(self, proc):
-        """Legge lo stderr di str2str (stampa una riga di stato ogni 5s di
-        default: '<data/ora> [<5 caratteri di stato>] <byte> B <bps> bps
-        <messaggi per stream>') e la traduce in entità MQTT per-output.
-        Formato verificato compilando e lanciando davvero str2str, non
-        dedotto dal solo help text."""
+        """Reads str2str's stderr (it prints a status line every 5s by
+        default: '<date/time> [<5-char status>] <byte> B <bps> bps
+        <per-stream messages>') and translates it into per-output MQTT
+        entities. Format verified by actually compiling and running
+        str2str, not just deduced from the help text."""
         labels = self.output_stream_plan()
         for line in proc.stderr:
             if proc is not self.str2str_proc:
-                return  # e' stato riavviato dal watchdog: questo thread e' obsoleto
+                return  # restarted by the watchdog: this thread is stale
             m = STR2STR_STATUS_RE.search(line)
             if not m:
                 continue
@@ -244,10 +248,10 @@ class App:
             time.sleep(5)
 
     def cleanup_raw_logs(self):
-        """Cancella periodicamente i file di log raw più vecchi della
-        retention configurata, per non riempire il disco (il logging è
-        sempre attivo per poter avviare una campagna PPP in qualsiasi
-        momento su una finestra recente)."""
+        """Periodically deletes raw log files older than the configured
+        retention, to avoid filling up the disk (logging is always on so
+        a PPP campaign can be started at any time over a recent
+        window)."""
         while True:
             cutoff = time.time() - self.raw_log_retention_hours * 3600
             for path in glob.glob(f"{RAW_LOG_DIR}/gnssbase_*.rtcm3"):
@@ -265,72 +269,72 @@ class App:
         d.publish_discovery(self.mqtt, "sensor", "fix_status", d.sensor_config(
             "fix_status", "Fix Status", f"{BASE}/fix_status/state", icon="mdi:crosshairs-gps"))
         d.publish_discovery(self.mqtt, "sensor", "satellites", d.sensor_config(
-            "satellites", "Satelliti in uso", f"{BASE}/satellites/state", unit="satelliti"))
+            "satellites", "Satellites in use", f"{BASE}/satellites/state", unit="satellites"))
         d.publish_discovery(self.mqtt, "sensor", "accuracy", d.sensor_config(
-            "accuracy", "Accuratezza stimata", f"{BASE}/accuracy/state", unit="m"))
+            "accuracy", "Estimated accuracy", f"{BASE}/accuracy/state", unit="m"))
         d.publish_discovery(self.mqtt, "sensor", "survey_in_status", d.sensor_config(
             "survey_in_status", "Survey-In", f"{BASE}/survey_in/state"))
         d.publish_discovery(self.mqtt, "button", "survey_in_start", d.button_config(
-            "survey_in_start", "Avvia Survey-In", f"{BASE}/survey_in/set", icon="mdi:crosshairs"))
+            "survey_in_start", "Start Survey-In", f"{BASE}/survey_in/set", icon="mdi:crosshairs"))
         d.publish_discovery(self.mqtt, "button", "survey_in_cancel", d.button_config(
-            "survey_in_cancel", "Annulla Survey-In", f"{BASE}/survey_in_cancel/set", icon="mdi:cancel"))
+            "survey_in_cancel", "Cancel Survey-In", f"{BASE}/survey_in_cancel/set", icon="mdi:cancel"))
         d.publish_discovery(self.mqtt, "sensor", "survey_in_remaining", d.sensor_config(
-            "survey_in_remaining", "Survey-In: tempo rimanente", f"{BASE}/survey_in_remaining/state",
+            "survey_in_remaining", "Survey-In: time remaining", f"{BASE}/survey_in_remaining/state",
             unit="s", icon="mdi:timer-sand", device_class="duration"))
         d.publish_discovery(self.mqtt, "number", "manual_lat", d.number_config(
-            "manual_lat", "Latitudine manuale", f"{BASE}/manual_lat/state",
+            "manual_lat", "Manual latitude", f"{BASE}/manual_lat/state",
             f"{BASE}/manual_lat/set", -90, 90, 0.0000001, "°"))
         d.publish_discovery(self.mqtt, "number", "manual_lon", d.number_config(
-            "manual_lon", "Longitudine manuale", f"{BASE}/manual_lon/state",
+            "manual_lon", "Manual longitude", f"{BASE}/manual_lon/state",
             f"{BASE}/manual_lon/set", -180, 180, 0.0000001, "°"))
         d.publish_discovery(self.mqtt, "number", "manual_height", d.number_config(
-            "manual_height", "Altezza manuale", f"{BASE}/manual_height/state",
+            "manual_height", "Manual height", f"{BASE}/manual_height/state",
             f"{BASE}/manual_height/set", -500, 9000, 0.001, "m"))
         d.publish_discovery(self.mqtt, "button", "apply_manual_position", d.button_config(
-            "apply_manual_position", "Applica posizione manuale",
+            "apply_manual_position", "Apply manual position",
             f"{BASE}/apply_manual_position/set", icon="mdi:map-marker-check"))
         d.publish_discovery(self.mqtt, "sensor", "ppp_status", d.sensor_config(
-            "ppp_status", "Campagna PPP", f"{BASE}/ppp_status/state", icon="mdi:satellite-variant"))
+            "ppp_status", "PPP campaign", f"{BASE}/ppp_status/state", icon="mdi:satellite-variant"))
         d.publish_discovery(self.mqtt, "number", "ppp_duration_hours", d.number_config(
-            "ppp_duration_hours", "Durata campagna PPP", f"{BASE}/ppp_duration_hours/state",
+            "ppp_duration_hours", "PPP campaign duration", f"{BASE}/ppp_duration_hours/state",
             f"{BASE}/ppp_duration_hours/set", 1, 48, 1, "h"))
         d.publish_discovery(self.mqtt, "button", "ppp_start", d.button_config(
-            "ppp_start", "Avvia campagna PPP", f"{BASE}/ppp_start/set", icon="mdi:satellite-uplink"))
+            "ppp_start", "Start PPP campaign", f"{BASE}/ppp_start/set", icon="mdi:satellite-uplink"))
         d.publish_discovery(self.mqtt, "button", "ppp_cancel", d.button_config(
-            "ppp_cancel", "Annulla campagna PPP", f"{BASE}/ppp_cancel/set", icon="mdi:cancel"))
+            "ppp_cancel", "Cancel PPP campaign", f"{BASE}/ppp_cancel/set", icon="mdi:cancel"))
         d.publish_discovery(self.mqtt, "sensor", "ppp_remaining", d.sensor_config(
-            "ppp_remaining", "Campagna PPP: tempo rimanente", f"{BASE}/ppp_remaining/state",
+            "ppp_remaining", "PPP campaign: time remaining", f"{BASE}/ppp_remaining/state",
             unit="s", icon="mdi:timer-sand", device_class="duration"))
         if self.caster_enabled:
             d.publish_discovery(self.mqtt, "sensor", "caster_clients", d.sensor_config(
-                "caster_clients", "Rover connessi (caster locale)",
-                f"{BASE}/caster_clients/state", unit="rover", icon="mdi:radio-tower"))
+                "caster_clients", "Connected rovers (local caster)",
+                f"{BASE}/caster_clients/state", unit="rovers", icon="mdi:radio-tower"))
         d.publish_discovery(self.mqtt, "binary_sensor", "device_connected", d.binary_sensor_config(
-            "device_connected", "Dispositivo connesso", f"{BASE}/device_connected/state",
+            "device_connected", "Device connected", f"{BASE}/device_connected/state",
             device_class="connectivity"))
         d.publish_discovery(self.mqtt, "sensor", "last_seen", d.sensor_config(
-            "last_seen", "Ultimo dato ricevuto", f"{BASE}/last_seen/state",
+            "last_seen", "Last data received", f"{BASE}/last_seen/state",
             icon="mdi:clock-outline", device_class="timestamp"))
         d.publish_discovery(self.mqtt, "sensor", "config_error", d.sensor_config(
-            "config_error", "Errore di configurazione", f"{BASE}/config_error/state",
+            "config_error", "Configuration error", f"{BASE}/config_error/state",
             icon="mdi:alert-circle-outline"))
         d.publish_discovery(self.mqtt, "sensor", "position_backup", d.sensor_config(
-            "position_backup", "Ultima posizione calcolata", f"{BASE}/position_backup/state",
+            "position_backup", "Last computed position", f"{BASE}/position_backup/state",
             icon="mdi:map-marker-check-outline", device_class="timestamp",
             json_attributes_topic=f"{BASE}/position_backup/attributes"))
         d.publish_discovery(self.mqtt, "sensor", "rtcm_bps", d.sensor_config(
-            "rtcm_bps", "RTCM bitrate in ingresso", f"{BASE}/rtcm_bps/state",
+            "rtcm_bps", "RTCM input bitrate", f"{BASE}/rtcm_bps/state",
             unit="bps", icon="mdi:speedometer"))
         d.publish_discovery(self.mqtt, "sensor", "str2str_diagnostics", d.sensor_config(
-            "str2str_diagnostics", "Diagnostica str2str", f"{BASE}/str2str_diagnostics/state",
+            "str2str_diagnostics", "str2str diagnostics", f"{BASE}/str2str_diagnostics/state",
             icon="mdi:text-box-outline"))
         for i, label in enumerate(self.output_stream_plan()):
             d.publish_discovery(self.mqtt, "sensor", f"output_{i}_status", d.sensor_config(
-                f"output_{i}_status", f"Stato uscita {i + 1}: {label}",
+                f"output_{i}_status", f"Output {i + 1} status: {label}",
                 f"{BASE}/output_{i}_status/state", icon="mdi:transmission-tower"))
 
     def on_connect(self, client, userdata, flags, rc):
-        print("[mqtt] connesso, rc=", rc, flush=True)
+        print("[mqtt] connected, rc=", rc, flush=True)
         self.publish_discovery()
         for topic in ("survey_in/set", "survey_in_cancel/set", "manual_lat/set", "manual_lon/set",
                       "manual_height/set", "apply_manual_position/set",
@@ -344,13 +348,14 @@ class App:
         self.restore_position_backup()
 
     def restore_position_backup(self):
-        """All'avvio, ripristina in memoria l'ultima posizione calcolata
-        (se presente su disco) e la esibisce come 'posizione manuale' e
-        come sensore di backup — utile se il container viene ricreato: il
-        ricevitore potrebbe aver già la sua config salvata, ma l'add-on da
-        solo non ricorderebbe altrimenti nulla su come/quando è stata
-        calcolata. Non la rimanda al ricevitore: solo dati/visibilità,
-        l'applicazione resta un'azione deliberata (pulsante)."""
+        """At startup, restores the last computed position in memory (if
+        present on disk) and exposes it as the 'manual position' and as
+        the backup sensor — useful if the container gets recreated: the
+        receiver may already have its config saved, but the add-on
+        itself would otherwise not remember anything about how/when it
+        was computed. Doesn't send it back to the receiver: only
+        data/visibility, applying it remains a deliberate action
+        (button)."""
         data = position_backup.load()
         if not data:
             return
@@ -360,7 +365,7 @@ class App:
         self.mqtt.publish(f"{BASE}/manual_height/state", f"{data['height']:.3f}", retain=True)
         self.mqtt.publish(f"{BASE}/position_backup/state", data["computed_at"], retain=True)
         self.mqtt.publish(f"{BASE}/position_backup/attributes", json.dumps(data), retain=True)
-        print(f"[main] posizione di backup ripristinata: {data['method']} @ {data['computed_at']}", flush=True)
+        print(f"[main] backup position restored: {data['method']} @ {data['computed_at']}", flush=True)
 
     def on_message(self, client, userdata, msg):
         payload = msg.payload.decode(errors="replace").strip()
@@ -389,39 +394,40 @@ class App:
 
     def cancel_survey_in(self):
         if self.survey_running and self.survey_cancel_event:
-            print("[survey-in] richiesta di annullamento ricevuta", flush=True)
+            print("[survey-in] cancellation request received", flush=True)
             self.survey_cancel_event.set()
 
     def cancel_ppp_campaign(self):
         if self.ppp_running and self.ppp_cancel_event:
-            print("[ppp] richiesta di annullamento ricevuta", flush=True)
+            print("[ppp] cancellation request received", flush=True)
             self.ppp_cancel_event.set()
 
     # ------------------------------------------------------------ survey-in
 
     def save_position_backup(self, lat, lon, height, method, **extra):
-        """Salva su /data la posizione appena fissata, con provenienza
-        (metodo, data/ora, parametri), e pubblica lo stesso contenuto come
-        entità MQTT (stato = timestamp, attributi = resto dei dati)."""
+        """Saves to /data the position just fixed, with provenance
+        (method, timestamp, parameters), and publishes the same content
+        as an MQTT entity (state = timestamp, attributes = the rest of
+        the data)."""
         data = position_backup.save(lat, lon, height, method, self.receiver_type, **extra)
         self.mqtt.publish(f"{BASE}/position_backup/state", data["computed_at"], retain=True)
         self.mqtt.publish(f"{BASE}/position_backup/attributes", json.dumps(data), retain=True)
 
     def run_survey_in(self):
-        """Media di posizioni standalone (single-point) per un tempo breve.
+        """Averages standalone (single-point) positions for a short time.
 
-        ATTENZIONE: questo è un survey-in "rapido" in stile consumer
-        (accuratezza tipica metrica/sub-metrica), NON equivalente al
-        posizionamento PPP statico di più ore usato per determinare la
-        posizione di installazione definitiva. Usalo per una stima veloce
-        o per ricollocazioni minori, non come sostituto del PPP.
+        WARNING: this is a "quick" consumer-style survey-in (typical
+        meter/sub-meter accuracy), NOT equivalent to the multi-hour
+        static PPP positioning used to determine the definitive
+        installation position. Use it for a quick estimate or minor
+        relocations, not as a substitute for PPP.
         """
         if self.survey_running:
             return
         self.survey_running = True
         self.survey_cancel_event = threading.Event()
         self.mqtt.publish(f"{BASE}/survey_in/state", "running", retain=True)
-        print(f"[survey-in] avviato per {self.survey_duration}s", flush=True)
+        print(f"[survey-in] started for {self.survey_duration}s", flush=True)
 
         self.driver.set_rover_mode(self.rtcm_port, self.baud)
 
@@ -445,7 +451,7 @@ class App:
                     if fix and fix["lat"] is not None and fix["quality"] > 0:
                         samples.append((fix["lat"], fix["lon"], fix["alt"]))
         except Exception as e:
-            print("[survey-in] errore:", e, flush=True)
+            print("[survey-in] error:", e, flush=True)
             self.mqtt.publish(f"{BASE}/survey_in/state", "error", retain=True)
             self.mqtt.publish(f"{BASE}/survey_in_remaining/state", 0, retain=True)
             self.survey_running = False
@@ -454,13 +460,13 @@ class App:
         self.mqtt.publish(f"{BASE}/survey_in_remaining/state", 0, retain=True)
 
         if cancelled:
-            print(f"[survey-in] annullato dall'utente dopo {len(samples)} campioni", flush=True)
+            print(f"[survey-in] cancelled by the user after {len(samples)} samples", flush=True)
             self.mqtt.publish(f"{BASE}/survey_in/state", "cancelled", retain=True)
             self.survey_running = False
             return
 
         if len(samples) < 10:
-            print("[survey-in] fallito: troppi pochi fix raccolti", flush=True)
+            print("[survey-in] failed: too few fixes collected", flush=True)
             self.mqtt.publish(f"{BASE}/survey_in/state", "error", retain=True)
             self.survey_running = False
             return
@@ -471,8 +477,8 @@ class App:
         avg_height = statistics.mean(heights) if heights else 0.0
 
         self.driver.set_fixed_base(self.rtcm_port, self.baud, avg_lat, avg_lon, avg_height)
-        print(f"[survey-in] completato: {avg_lat:.7f}, {avg_lon:.7f}, {avg_height:.2f} "
-              f"({len(samples)} campioni)", flush=True)
+        print(f"[survey-in] completed: {avg_lat:.7f}, {avg_lon:.7f}, {avg_height:.2f} "
+              f"({len(samples)} samples)", flush=True)
         self.save_position_backup(avg_lat, avg_lon, avg_height, "survey_in",
                                    duration_sec=self.survey_duration, num_samples=len(samples))
         self.mqtt.publish(f"{BASE}/survey_in/state", "done", retain=True)
@@ -481,12 +487,13 @@ class App:
     # -------------------------------------------------------------- PPP
 
     def run_ppp_campaign(self):
-        """Campagna PPP-static: aspetta ppp_duration_hours ore accumulando
-        il log raw (già sempre attivo via str2str), poi elabora la finestra
-        con RTKLIB (convbin + rnx2rtkp PPP-static + prodotti IGS) e applica
-        la posizione risultante come base fissa. Precisione attesa:
-        centimetrica con log di diverse ore, a differenza del survey-in
-        rapido che è solo metrico."""
+        """PPP-static campaign: waits ppp_duration_hours hours while
+        accumulating the raw log (already always active via str2str),
+        then processes the window with RTKLIB (convbin + rnx2rtkp
+        PPP-static + IGS products) and applies the resulting position as
+        the fixed base. Expected accuracy: centimeter-level with logs of
+        several hours, unlike the quick survey-in which is only
+        meter-level."""
         if self.ppp_running:
             return
         self.ppp_running = True
@@ -495,14 +502,14 @@ class App:
         duration_s = self.ppp_duration_hours * 3600
         deadline = start_ts + duration_s
         self.mqtt.publish(f"{BASE}/ppp_status/state", "logging", retain=True)
-        print(f"[ppp] campagna avviata, durata {self.ppp_duration_hours}h", flush=True)
+        print(f"[ppp] campaign started, duration {self.ppp_duration_hours}h", flush=True)
 
         while True:
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
             if self.ppp_cancel_event.is_set():
-                print("[ppp] campagna annullata dall'utente durante la registrazione", flush=True)
+                print("[ppp] campaign cancelled by the user during logging", flush=True)
                 self.mqtt.publish(f"{BASE}/ppp_status/state", "cancelled", retain=True)
                 self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
                 self.ppp_running = False
@@ -518,7 +525,7 @@ class App:
                 workdir = Path(workdir)
                 raw_files = ppp.collect_raw_files(RAW_LOG_DIR, start_ts, end_ts)
                 if not raw_files:
-                    raise RuntimeError("Nessun file di log raw trovato per la finestra della campagna")
+                    raise RuntimeError("No raw log file found for the campaign window")
                 raw_concat = workdir / "campaign.rtcm3"
                 ppp.concat_raw_files(raw_files, raw_concat)
 
@@ -528,13 +535,13 @@ class App:
                 pos_path = ppp.run_rnx2rtkp(obs_path, nav_path, sp3_paths, clk_paths, atx_path, workdir)
                 lat, lon, height = ppp.parse_last_position(pos_path)
         except Exception as e:
-            print("[ppp] errore:", e, flush=True)
+            print("[ppp] error:", e, flush=True)
             self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
             self.ppp_running = False
             return
 
         self.driver.set_fixed_base(self.rtcm_port, self.baud, lat, lon, height)
-        print(f"[ppp] completato: {lat:.8f}, {lon:.8f}, {height:.3f}", flush=True)
+        print(f"[ppp] completed: {lat:.8f}, {lon:.8f}, {height:.3f}", flush=True)
         self.save_position_backup(lat, lon, height, "ppp",
                                    duration_hours=self.ppp_duration_hours, num_raw_files=len(raw_files))
         self.mqtt.publish(f"{BASE}/ppp_status/state", "done", retain=True)
@@ -546,21 +553,21 @@ class App:
 
     def apply_manual_position(self):
         if None in (self.manual_lat, self.manual_lon, self.manual_height):
-            print("[main] posizione manuale incompleta: imposta lat/lon/height prima di applicare", flush=True)
+            print("[main] manual position incomplete: set lat/lon/height before applying", flush=True)
             return
         self.driver.set_fixed_base(self.rtcm_port, self.baud, self.manual_lat, self.manual_lon, self.manual_height)
-        print("[main] posizione manuale applicata:",
+        print("[main] manual position applied:",
               self.manual_lat, self.manual_lon, self.manual_height, flush=True)
         self.save_position_backup(self.manual_lat, self.manual_lon, self.manual_height, "manual")
 
     # -------------------------------------------------------------- monitor
 
     def monitor_nmea(self):
-        """Loop principale di lettura NMEA, con riconnessione automatica:
-        se la porta seriale scompare (USB scollegata) o non arriva più
-        nulla per SERIAL_SILENCE_TIMEOUT_S secondi, segnala la
-        disconnessione su MQTT e ritenta ad intervalli regolari, senza
-        mai far terminare il processo dell'add-on."""
+        """Main NMEA reading loop, with automatic reconnection: if the
+        serial port disappears (USB unplugged) or nothing arrives for
+        SERIAL_SILENCE_TIMEOUT_S seconds, it signals the disconnection on
+        MQTT and retries at regular intervals, without ever terminating
+        the add-on process."""
         while True:
             wait_for_serial_port(self.nmea_port, "NMEA")
             try:
@@ -571,10 +578,10 @@ class App:
                         line = ser.readline().decode(errors="replace")
                         if not line:
                             if not os.path.exists(self.nmea_port):
-                                raise serial.SerialException("la porta seriale non esiste più")
+                                raise serial.SerialException("the serial port no longer exists")
                             if time.time() - last_data_ts > SERIAL_SILENCE_TIMEOUT_S:
                                 raise serial.SerialException(
-                                    f"nessun dato da oltre {SERIAL_SILENCE_TIMEOUT_S}s")
+                                    f"no data for over {SERIAL_SILENCE_TIMEOUT_S}s")
                             continue
                         last_data_ts = time.time()
                         self.set_device_connected(True)
@@ -608,12 +615,12 @@ class App:
     # ----------------------------------------------------------------- run
 
     def run(self):
-        print(f"[main] driver ricevitore: {self.receiver_type} "
+        print(f"[main] receiver driver: {self.receiver_type} "
               f"({getattr(self.driver, 'NAME', '?')})", flush=True)
-        # MQTT va connesso prima di configure_receiver(): quest'ultima può
-        # dover attendere a lungo che l'USB compaia, e in quell'attesa
-        # vogliamo poter pubblicare lo stato "non connesso" invece di
-        # restare in silenzio.
+        # MQTT must be connected before configure_receiver(): the latter
+        # may have to wait a long time for the USB to appear, and during
+        # that wait we want to be able to publish the "not connected"
+        # status instead of staying silent.
         mqtt_host = os.environ.get("MQTT_HOST", "localhost")
         mqtt_port = int(os.environ.get("MQTT_PORT", 1883))
         while True:
@@ -621,9 +628,9 @@ class App:
                 self.mqtt.connect(mqtt_host, mqtt_port, keepalive=30)
                 break
             except OSError as e:
-                print(f"[main] broker MQTT non raggiungibile ({mqtt_host}:{mqtt_port}): {e}. "
-                      f"Installa/avvia l'add-on Mosquitto broker (o configura un broker esterno). "
-                      f"Ritento in {MQTT_RETRY_INTERVAL_S}s...", flush=True)
+                print(f"[main] MQTT broker unreachable ({mqtt_host}:{mqtt_port}): {e}. "
+                      f"Install/start the Mosquitto broker add-on (or configure an external broker). "
+                      f"Retrying in {MQTT_RETRY_INTERVAL_S}s...", flush=True)
                 time.sleep(MQTT_RETRY_INTERVAL_S)
         self.mqtt.loop_start()
 
@@ -648,7 +655,7 @@ class App:
                               daemon=True).start()
             threading.Thread(target=self.publish_caster_clients, daemon=True).start()
 
-        self.monitor_nmea()  # loop principale, bloccante
+        self.monitor_nmea()  # main loop, blocking
 
 
 if __name__ == "__main__":
