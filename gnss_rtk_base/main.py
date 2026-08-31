@@ -243,11 +243,20 @@ class App:
     def watchdog_str2str(self):
         while True:
             time.sleep(10)
-            if self.str2str_proc is not None and self.str2str_proc.poll() is not None:
-                print("[main] str2str terminated unexpectedly, restarting...", flush=True)
-                self.str2str_proc = subprocess.Popen(
-                    self.str2str_proc.args, stderr=subprocess.PIPE, text=True, bufsize=1)
-                threading.Thread(target=self.monitor_str2str_status, args=(self.str2str_proc,), daemon=True).start()
+            if self.str2str_proc is not None:
+                code = self.str2str_proc.poll()
+                if code is not None:
+                    # Popen.returncode: >=0 is the process's own exit code,
+                    # negative is -signal (e.g. -11 = SIGSEGV, -9 = SIGKILL,
+                    # -6 = SIGABRT) - distinguishes "str2str exited on its
+                    # own" from "something killed it", which the previous
+                    # message alone couldn't (found missing while
+                    # diagnosing a real crash-loop with no other clue).
+                    print(f"[main] str2str terminated unexpectedly (exit code {code}), "
+                          f"restarting...", flush=True)
+                    self.str2str_proc = subprocess.Popen(
+                        self.str2str_proc.args, stderr=subprocess.PIPE, text=True, bufsize=1)
+                    threading.Thread(target=self.monitor_str2str_status, args=(self.str2str_proc,), daemon=True).start()
 
     def monitor_str2str_status(self, proc):
         """Reads str2str's stderr (it prints a status line every 5s by

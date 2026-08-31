@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.14
+
+- Diagnostics: `watchdog_str2str()` now logs `str2str`'s exit code when
+  it dies, e.g. "terminated unexpectedly (exit code -11), restarting..."
+  (Popen convention: >=0 is the process's own exit status, negative is
+  -signal - -11 is SIGSEGV, -9 SIGKILL, -6 SIGABRT). Added while
+  diagnosing a real crash-loop on a user's Home Assistant instance where
+  0.2.13's new `[str2str] ...` stderr logging showed "stream server
+  start" right before every restart but no further error text - meaning
+  str2str isn't failing to open the port with a printed error, it's
+  dying (likely a signal), which this makes visible for the first time.
+
 ## 0.2.13
 
 - Fix: `monitor_str2str_status()` silently dropped every `str2str`
