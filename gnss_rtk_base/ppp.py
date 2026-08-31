@@ -17,12 +17,19 @@ import requests
 
 GPS_EPOCH = dt.date(1980, 1, 6)
 
+# files.igs.org no longer mirrors IGS products (confirmed against the live
+# server: its own /pub/product/readme.txt says so and points elsewhere) -
+# using it here would have made every download fail. BKG (Bundesamt fuer
+# Kartographie und Geodaesie, Germany) is public and requires no
+# authentication, verified with a real download; CDDIS is kept as a
+# fallback for setups with NASA Earthdata credentials in ~/.netrc (see the
+# note in ISTRUZIONI.md), but 401s otherwise.
 SP3_CLK_MIRRORS = [
-    "https://files.igs.org/pub/products/{week}",
+    "https://igs.bkg.bund.de/root_ftp/IGS/products/{week}",
     "https://cddis.nasa.gov/archive/gnss/products/{week}",
 ]
 ANTEX_MIRRORS = [
-    "https://files.igs.org/pub/station/general/igs20.atx",
+    "https://igs.bkg.bund.de/root_ftp/IGS/station/general/igs20.atx",
     "https://cddis.nasa.gov/archive/gnss/data/daily/misc/igs20.atx",
 ]
 
@@ -133,11 +140,14 @@ def gunzip(path):
 
 
 def build_igs_names(date, product):
+    """Verified against a real directory listing (BKG mirror): FIN only
+    publishes 15M-sampled orbits (not 05M) and RAP only publishes
+    05M-sampled clocks (not 30S) - only FIN has a 30S clock variant."""
     doy = date.timetuple().tm_yday
     tag = {"FIN": "IGS0OPSFIN", "RAP": "IGS0OPSRAP"}[product]
-    orb_sample = "05M" if product == "FIN" else "15M"
-    sp3 = f"{tag}_{date.year}{doy:03d}0000_01D_{orb_sample}_ORB.SP3.gz"
-    clk = f"{tag}_{date.year}{doy:03d}0000_01D_30S_CLK.CLK.gz"
+    clk_sample = "30S" if product == "FIN" else "05M"
+    sp3 = f"{tag}_{date.year}{doy:03d}0000_01D_15M_ORB.SP3.gz"
+    clk = f"{tag}_{date.year}{doy:03d}0000_01D_{clk_sample}_CLK.CLK.gz"
     return sp3, clk
 
 

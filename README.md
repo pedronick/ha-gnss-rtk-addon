@@ -354,8 +354,13 @@ sent back to the receiver — that remains a deliberate action via
 `button.apply_manual_position`, if you decide to reapply it).
 
 Note: the PPP campaign requires outbound internet access from the
-container to download the IGS products (SP3/CLK/ANTEX) from
-`files.igs.org` (public, no credentials required).
+container to download the IGS products (SP3/CLK/ANTEX) from BKG
+(Bundesamt für Kartographie und Geodäsie, Germany - public, no
+credentials required, verified with a real download). The previous
+mirror, `files.igs.org`, no longer serves IGS products at all (its own
+`readme.txt` says so) - every download through it would have failed;
+this was found and fixed by testing a real PPP campaign against actual
+hardware, see the changelog.
 
 ## Automated tests (runnable outside Home Assistant)
 

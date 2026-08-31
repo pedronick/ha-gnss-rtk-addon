@@ -18,13 +18,16 @@ def test_gps_week_dow_epoch_and_known_reference():
 
 
 def test_build_igs_names_final_and_rapid():
+    # Verified against a real directory listing (BKG mirror): FIN only
+    # publishes 15M orbits (not 05M) and RAP only publishes 05M clocks
+    # (not 30S) - only FIN has a 30S clock variant.
     sp3, clk = ppp.build_igs_names(dt.date(2024, 1, 15), "FIN")
-    assert sp3 == "IGS0OPSFIN_20240150000_01D_05M_ORB.SP3.gz"
+    assert sp3 == "IGS0OPSFIN_20240150000_01D_15M_ORB.SP3.gz"
     assert clk == "IGS0OPSFIN_20240150000_01D_30S_CLK.CLK.gz"
 
-    sp3_rap, _ = ppp.build_igs_names(dt.date(2024, 1, 15), "RAP")
-    assert "IGS0OPSRAP" in sp3_rap
-    assert "15M" in sp3_rap
+    sp3_rap, clk_rap = ppp.build_igs_names(dt.date(2024, 1, 15), "RAP")
+    assert sp3_rap == "IGS0OPSRAP_20240150000_01D_15M_ORB.SP3.gz"
+    assert clk_rap == "IGS0OPSRAP_20240150000_01D_05M_CLK.CLK.gz"
 
 
 def test_fetch_precise_products_falls_back_from_fin_to_rap(monkeypatch, tmp_path):

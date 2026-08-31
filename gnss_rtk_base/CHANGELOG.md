@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.11
+
+- Fix (PPP campaign, critical): the IGS product download had never
+  actually worked, for three independent reasons, only found by testing
+  a real (short) PPP campaign against actual hardware and then probing
+  the real servers with curl:
+  1. The primary mirror, `files.igs.org`, no longer serves IGS products
+     at all - its own `readme.txt` says so and points elsewhere.
+  2. The fallback mirror, CDDIS, requires NASA Earthdata credentials
+     that the add-on has no way to provide.
+  3. Even with a working mirror, the requested filenames were wrong:
+     FIN orbit products are only published at 15M sampling (not 05M),
+     and RAP clock products are only published at 05M sampling (not
+     30S) - verified against a real directory listing.
+  Switched the primary mirror to BKG (Bundesamt für Kartographie und
+  Geodäsie, Germany), public and unauthenticated, and fixed the
+  filenames - verified with a real end-to-end download (SP3 + CLK +
+  ANTEX) and a real `rnx2rtkp` run.
+
 ## 0.2.10
 
 - Fix (PPP campaign): `run_ppp_campaign()`'s temp workdir was hardcoded
