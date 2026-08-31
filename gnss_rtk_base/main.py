@@ -11,6 +11,7 @@ import glob
 import json
 import os
 import re
+import socket
 import statistics
 import subprocess
 import tempfile
@@ -37,6 +38,7 @@ WEBUI_PORT = 8099
 SERIAL_RETRY_INTERVAL_S = 5
 SERIAL_SILENCE_TIMEOUT_S = 15
 MQTT_RETRY_INTERVAL_S = 10
+RELAY_READ_TIMEOUT_S = 1  # socket timeout for _relay_line_reader(), module-level so tests can shorten it
 
 # str2str status line format (verified with a real binary):
 # "2024/01/15 12:34:56 [CC---]        425 B     699 bps (1) send error (111) "
@@ -77,7 +79,13 @@ class App:
         self.caster_user = opts.get("caster_user", "")
         self.caster_password = opts.get("caster_password", "")
         self.caster_max_clients = opts.get("caster_max_clients", 10)
-        self.broadcaster = caster.Broadcaster() if self.caster_enabled else None
+        # Always created (cheap, no listening socket yet): needed both for
+        # the local NTRIP caster (caster_enabled) and, when rtcm_port ==
+        # nmea_port, as the way monitor_nmea()/run_survey_in() read NMEA
+        # without opening the physical serial port a second time (see
+        # needs_internal_relay()).
+        self.broadcaster = caster.Broadcaster()
+        self._last_fix_publish = 0
 
         self.str2str_proc = None
         self.survey_running = False
@@ -139,6 +147,19 @@ class App:
     def active_casters(self):
         return [c for c in self.ntrip_casters if c.get("host")]
 
+    def needs_internal_relay(self):
+        """Whether str2str needs an extra -out tcpcli://127.0.0.1:... feeding
+        caster.py's internal relay (see build_str2str_cmd/run()). True if the
+        local NTRIP caster is enabled (rovers need the byte stream), or if
+        rtcm_port == nmea_port: in that case str2str is already the sole
+        process reading the physical serial port continuously, so
+        monitor_nmea()/run_survey_in() must get their NMEA lines from this
+        relay instead of opening the same device a second time - verified on
+        real hardware that a second direct serial.Serial() there races with
+        str2str for bytes on the same character device, flapping
+        device_connected ON/OFF every ~15-20s with corrupted/lost NMEA."""
+        return self.caster_enabled or self.nmea_port == self.rtcm_port
+
     def output_stream_plan(self):
         """Labels for the -out streams passed to str2str, in the same
         order in which they are added by build_str2str_cmd(). Used to
@@ -148,8 +169,8 @@ class App:
         strsvrstat()/str2str.c in RTKLIB and with a compiled binary)."""
         labels = [f"{c['host']}:{c['port']}/{c.get('mountpoint', '')}" for c in self.active_casters()]
         labels.append("raw log")
-        if self.caster_enabled:
-            labels.append("local caster")
+        if self.needs_internal_relay():
+            labels.append("local caster" if self.caster_enabled else "internal relay (NMEA)")
         return labels
 
     def validate_stream_budget(self):
@@ -160,12 +181,17 @@ class App:
         loudly here than discover it at runtime."""
         needed = len(self.output_stream_plan())
         if needed > 4:
+            relay_reason = ""
+            if self.needs_internal_relay():
+                relay_reason = (" + 1 local caster" if self.caster_enabled
+                                 else " + 1 internal relay (rtcm_port == nmea_port)")
             raise ValueError(
                 f"Too many outputs configured for str2str: {needed} "
                 f"({len(self.active_casters())} NTRIP caster(s) + 1 raw log"
-                f"{' + 1 local caster' if self.caster_enabled else ''}), "
+                f"{relay_reason}), "
                 f"the maximum supported by RTKLIB is 4. Reduce the number "
-                f"of entries in ntrip_casters or disable caster_enabled."
+                f"of entries in ntrip_casters, disable caster_enabled, or use "
+                f"a separate nmea_port."
             )
 
     def build_str2str_cmd(self):
@@ -197,10 +223,11 @@ class App:
         # recognizes the %Y%m%d%h tags in the path and creates a new file
         # every hour).
         cmd += ["-out", f"file://{RAW_LOG_DIR}/gnssbase_%Y%m%d%h.rtcm3"]
-        if self.caster_enabled:
+        if self.needs_internal_relay():
             # str2str connects to our internal relay (caster.py) and
-            # forwards the stream to us, which we re-distribute to
-            # connected rovers.
+            # forwards the stream to us. Consumers: connected rovers (if
+            # caster_enabled) and/or our own NMEA monitor/survey-in (if
+            # rtcm_port == nmea_port, see needs_internal_relay()).
             cmd += ["-out", f"tcpcli://127.0.0.1:{caster.INTERNAL_RELAY_PORT}"]
         return cmd
 
@@ -413,6 +440,67 @@ class App:
         self.mqtt.publish(f"{BASE}/position_backup/state", data["computed_at"], retain=True)
         self.mqtt.publish(f"{BASE}/position_backup/attributes", json.dumps(data), retain=True)
 
+    def _relay_line_reader(self):
+        """Subscribes as a client of the internal relay fed by str2str
+        (same mechanism as the local NTRIP caster) and returns
+        (read_line, close): read_line() behaves like pyserial's
+        readline(timeout=1) - blocks up to ~1s, returns "" on timeout or
+        if the underlying connection is gone. Used instead of a direct
+        serial.Serial() whenever rtcm_port == nmea_port, since str2str is
+        already the sole reader of that physical port (see
+        needs_internal_relay())."""
+        pub_sock, priv_sock = socket.socketpair()
+        self.broadcaster.add_client(pub_sock)
+        priv_sock.settimeout(RELAY_READ_TIMEOUT_S)
+        buf = bytearray()
+
+        def read_line():
+            while b"\n" not in buf:
+                try:
+                    chunk = priv_sock.recv(4096)
+                except socket.timeout:
+                    return ""
+                except OSError:
+                    return ""
+                if not chunk:
+                    return ""
+                buf.extend(chunk)
+            idx = buf.index(b"\n")
+            line = bytes(buf[:idx + 1])
+            del buf[:idx + 1]
+            return line.decode(errors="replace")
+
+        def close():
+            try:
+                priv_sock.close()
+            except OSError:
+                pass
+
+        return read_line, close
+
+    def _process_nmea_line(self, line):
+        gga = nmea.parse_gga(line)
+        if gga:
+            self.state.update_gga(gga)
+            now = time.time()
+            if now - self._last_fix_publish > 1:
+                self.mqtt.publish(f"{BASE}/fix_status/state", nmea.fix_label(gga["quality"]), retain=True)
+                self.mqtt.publish(f"{BASE}/satellites/state", gga["num_sv"], retain=True)
+                self._last_fix_publish = now
+            return
+        gst = nmea.parse_gst(line)
+        if gst:
+            self.state.update_gst(gst["accuracy_m"])
+            self.mqtt.publish(f"{BASE}/accuracy/state", gst["accuracy_m"], retain=True)
+            return
+        gsv = nmea.parse_gsv(line)
+        if gsv:
+            self.state.update_gsv(gsv)
+            return
+        gsa = nmea.parse_gsa(line)
+        if gsa:
+            self.state.update_gsa(gsa)
+
     def run_survey_in(self):
         """Averages standalone (single-point) positions for a short time.
 
@@ -435,7 +523,12 @@ class App:
         deadline = time.time() + self.survey_duration
         cancelled = False
         try:
-            with serial.Serial(self.nmea_port, self.baud, timeout=1) as ser:
+            if self.nmea_port == self.rtcm_port:
+                read_line, close_reader = self._relay_line_reader()
+            else:
+                ser = serial.Serial(self.nmea_port, self.baud, timeout=1)
+                read_line, close_reader = (lambda: ser.readline().decode(errors="replace")), ser.close
+            try:
                 last_progress = 0
                 while time.time() < deadline:
                     if self.survey_cancel_event.is_set():
@@ -446,10 +539,12 @@ class App:
                         self.mqtt.publish(f"{BASE}/survey_in_remaining/state",
                                            max(0, int(deadline - now)), retain=True)
                         last_progress = now
-                    line = ser.readline().decode(errors="replace")
+                    line = read_line()
                     fix = nmea.parse_gga(line)
                     if fix and fix["lat"] is not None and fix["quality"] > 0:
                         samples.append((fix["lat"], fix["lon"], fix["alt"]))
+            finally:
+                close_reader()
         except Exception as e:
             print("[survey-in] error:", e, flush=True)
             self.mqtt.publish(f"{BASE}/survey_in/state", "error", retain=True)
@@ -563,8 +658,21 @@ class App:
     # -------------------------------------------------------------- monitor
 
     def monitor_nmea(self):
-        """Main NMEA reading loop, with automatic reconnection: if the
-        serial port disappears (USB unplugged) or nothing arrives for
+        """Main NMEA reading loop. Dispatches to one of two strategies
+        depending on whether rtcm_port == nmea_port (see
+        needs_internal_relay() for why a shared physical port can't be
+        opened a second time directly)."""
+        if self.nmea_port == self.rtcm_port:
+            self._monitor_nmea_via_relay()
+        else:
+            self._monitor_nmea_via_serial()
+
+    def _monitor_nmea_via_serial(self):
+        """Used when nmea_port is a physically separate port from
+        rtcm_port (e.g. a receiver wired with two independent UARTs): a
+        direct serial.Serial() here doesn't compete with str2str, which
+        only reads rtcm_port. Automatic reconnection: if the serial port
+        disappears (USB unplugged) or nothing arrives for
         SERIAL_SILENCE_TIMEOUT_S seconds, it signals the disconnection on
         MQTT and retries at regular intervals, without ever terminating
         the add-on process."""
@@ -572,7 +680,6 @@ class App:
             wait_for_serial_port(self.nmea_port, "NMEA")
             try:
                 with serial.Serial(self.nmea_port, self.baud, timeout=1) as ser:
-                    last_publish = 0
                     last_data_ts = time.time()
                     while True:
                         line = ser.readline().decode(errors="replace")
@@ -585,32 +692,49 @@ class App:
                             continue
                         last_data_ts = time.time()
                         self.set_device_connected(True)
-
-                        gga = nmea.parse_gga(line)
-                        if gga:
-                            self.state.update_gga(gga)
-                            now = time.time()
-                            if now - last_publish > 1:
-                                self.mqtt.publish(f"{BASE}/fix_status/state",
-                                                   nmea.fix_label(gga["quality"]), retain=True)
-                                self.mqtt.publish(f"{BASE}/satellites/state", gga["num_sv"], retain=True)
-                                last_publish = now
-                            continue
-                        gst = nmea.parse_gst(line)
-                        if gst:
-                            self.state.update_gst(gst["accuracy_m"])
-                            self.mqtt.publish(f"{BASE}/accuracy/state", gst["accuracy_m"], retain=True)
-                            continue
-                        gsv = nmea.parse_gsv(line)
-                        if gsv:
-                            self.state.update_gsv(gsv)
-                            continue
-                        gsa = nmea.parse_gsa(line)
-                        if gsa:
-                            self.state.update_gsa(gsa)
+                        self._process_nmea_line(line)
             except (serial.SerialException, OSError) as e:
                 self.set_device_connected(False, reason=str(e))
                 time.sleep(SERIAL_RETRY_INTERVAL_S)
+
+    def _monitor_nmea_via_relay(self):
+        """Used when rtcm_port == nmea_port: str2str is already the sole
+        process reading the physical serial port (started once in run()
+        and kept alive for the app's lifetime). A second direct
+        serial.Serial() here would race with it for bytes on the same
+        character device - verified on real hardware: without this,
+        device_connected flapped ON/OFF every ~15-20s with corrupted/lost
+        NMEA. Instead, subscribe as a client of the same internal relay
+        used for the local NTRIP caster (str2str -out tcpcli://... ->
+        caster.run_relay_receiver), which carries the raw byte stream
+        unfiltered: str2str relays bytes verbatim, so RTCM3 and NMEA
+        arrive interleaved on it (verified against a real capture
+        containing readable $GNGGA lines).
+
+        Known limitation: this only receives data while str2str is
+        actually running. If validate_stream_budget() rejected the
+        configuration (too many outputs), str2str never starts and this
+        loop will silently see no data (device_connected stays OFF) even
+        if the receiver itself is fine - check sensor.configuration_error
+        in that case."""
+        while True:
+            read_line, close_reader = self._relay_line_reader()
+            last_data_ts = time.time()
+            try:
+                while True:
+                    line = read_line()
+                    if not line:
+                        if time.time() - last_data_ts > SERIAL_SILENCE_TIMEOUT_S:
+                            raise OSError(f"no data for over {SERIAL_SILENCE_TIMEOUT_S}s via internal relay")
+                        continue
+                    last_data_ts = time.time()
+                    self.set_device_connected(True)
+                    self._process_nmea_line(line)
+            except OSError as e:
+                self.set_device_connected(False, reason=str(e))
+            finally:
+                close_reader()
+            time.sleep(SERIAL_RETRY_INTERVAL_S)
 
     # ----------------------------------------------------------------- run
 
@@ -648,11 +772,14 @@ class App:
             self.mqtt.publish(f"{BASE}/config_error/state", str(e), retain=True)
         else:
             self.mqtt.publish(f"{BASE}/config_error/state", "", retain=True)
+            if self.needs_internal_relay():
+                # Started before str2str so the relay is already listening
+                # when str2str's -out tcpcli:// tries to connect to it.
+                threading.Thread(target=caster.run_relay_receiver, args=(self.broadcaster,), daemon=True).start()
             self.start_str2str()
             threading.Thread(target=self.watchdog_str2str, daemon=True).start()
 
         if self.caster_enabled:
-            threading.Thread(target=caster.run_relay_receiver, args=(self.broadcaster,), daemon=True).start()
             threading.Thread(target=caster.run_caster_server,
                               args=(self.broadcaster, self.caster_mountpoint, self.caster_user,
                                     self.caster_password, caster.CASTER_PORT, self.caster_max_clients),

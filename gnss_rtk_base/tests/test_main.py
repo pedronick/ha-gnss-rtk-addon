@@ -43,6 +43,8 @@ def _bare_app(**overrides):
         ppp_running=False,
         survey_cancel_event=None,
         ppp_cancel_event=None,
+        broadcaster=caster.Broadcaster(),
+        _last_fix_publish=0,
     )
     defaults.update(overrides)
     for key, value in defaults.items():
@@ -51,7 +53,10 @@ def _bare_app(**overrides):
 
 
 def test_build_str2str_cmd_includes_one_out_per_caster_and_log_file():
-    app = _bare_app(ntrip_casters=[
+    # nmea_port deliberately different from rtcm_port: this test is about
+    # the caster/log outputs, decoupled from needs_internal_relay()'s
+    # extra -out for the rtcm_port == nmea_port case (covered separately).
+    app = _bare_app(nmea_port="/dev/null-fake-nmea", ntrip_casters=[
         {"host": "rtk2go.com", "port": 2101, "mountpoint": "A", "password": "p1"},
         {"host": "caster.example.com", "port": 2101, "mountpoint": "B", "password": "p2"},
         {"host": "", "port": 2101, "mountpoint": "", "password": ""},  # empty slot
@@ -99,7 +104,7 @@ def test_build_str2str_cmd_does_not_shadow_caster_module():
 
 
 def test_build_str2str_cmd_without_any_caster_configured():
-    app = _bare_app(ntrip_casters=[])
+    app = _bare_app(nmea_port="/dev/null-fake-nmea", ntrip_casters=[])
     cmd = app.build_str2str_cmd()
     outs = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "-out"]
     assert len(outs) == 1  # only the log file
@@ -120,7 +125,9 @@ def test_build_str2str_cmd_strips_dev_prefix_from_serial_port(port):
 
 def test_validate_stream_budget_ok_at_the_limit():
     # 3 casters + 1 log = 4, exactly at RTKLIB's limit (MAXSTR=5: 1 in + 4 out).
-    app = _bare_app(ntrip_casters=[
+    # nmea_port != rtcm_port so needs_internal_relay() doesn't add a 5th
+    # output here (that combination is covered by the "raises" test below).
+    app = _bare_app(nmea_port="/dev/null-fake-nmea", ntrip_casters=[
         {"host": f"caster{i}.example.com", "port": 2101, "mountpoint": "M", "password": "p"}
         for i in range(3)
     ], caster_enabled=False)
@@ -259,12 +266,14 @@ def test_configure_receiver_waits_then_succeeds_when_port_appears(fake_serial_pa
     assert not t.is_alive()
 
 
-def test_monitor_nmea_recovers_after_disconnect(fake_serial_pair, tmp_path):
+def test_monitor_nmea_recovers_after_disconnect_different_ports(fake_serial_pair, tmp_path):
+    """nmea_port != rtcm_port: monitor_nmea takes the direct-serial branch
+    (_monitor_nmea_via_serial), unaffected by str2str."""
     master_fd, slave_path = fake_serial_pair
     fake_port = str(tmp_path / "fake_ttyUSB0")
     os.symlink(slave_path, fake_port)
 
-    app = _bare_app(rtcm_port=fake_port, nmea_port=fake_port)
+    app = _bare_app(rtcm_port="/dev/null-fake-rtcm", nmea_port=fake_port)
 
     mon = threading.Thread(target=app.monitor_nmea, daemon=True)
     mon.start()
@@ -278,6 +287,44 @@ def test_monitor_nmea_recovers_after_disconnect(fake_serial_pair, tmp_path):
     os.close(master_fd)
     os.remove(fake_port)
     time.sleep(main.SERIAL_RETRY_INTERVAL_S + 2)
+
+    connected = [p for t, p in app.mqtt.published if t.endswith("device_connected/state")]
+    assert connected[-1] == "OFF"
+    assert mon.is_alive(), "the monitor must not terminate: it must keep retrying"
+
+
+def test_monitor_nmea_recovers_after_disconnect_same_port_via_relay(monkeypatch):
+    """rtcm_port == nmea_port (the most common single-cable setup):
+    monitor_nmea must read NMEA from the internal relay fed by str2str,
+    not by opening the physical port a second time (see
+    needs_internal_relay()/_monitor_nmea_via_relay's docstring - verified
+    on real hardware that a second direct open there races with str2str
+    and corrupts/loses data)."""
+    monkeypatch.setattr(main, "SERIAL_SILENCE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(main, "RELAY_READ_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(main, "SERIAL_RETRY_INTERVAL_S", 0.1)
+
+    app = _bare_app(rtcm_port="/dev/null-fake", nmea_port="/dev/null-fake")
+
+    mon = threading.Thread(target=app.monitor_nmea, daemon=True)
+    mon.start()
+
+    for _ in range(50):
+        if app.broadcaster.num_clients() >= 1:
+            break
+        time.sleep(0.05)
+    assert app.broadcaster.num_clients() >= 1, "monitor_nmea must subscribe to the internal relay"
+
+    # Simulates str2str forwarding a byte chunk from the receiver.
+    app.broadcaster.broadcast(b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n")
+    time.sleep(0.3)
+
+    connected = [p for t, p in app.mqtt.published if t.endswith("device_connected/state")]
+    assert connected and connected[-1] == "ON"
+
+    # No more broadcasts: simulates str2str going quiet (e.g. receiver
+    # disconnected) past the (patched) silence timeout.
+    time.sleep(1.0)
 
     connected = [p for t, p in app.mqtt.published if t.endswith("device_connected/state")]
     assert connected[-1] == "OFF"
@@ -325,6 +372,11 @@ def test_restore_position_backup_noop_when_no_backup_exists(tmp_path, monkeypatc
 
 
 def test_run_survey_in_reports_remaining_time_and_can_be_cancelled(fake_serial_pair):
+    # rtcm_port == nmea_port: run_survey_in must read fixes via the
+    # internal relay (see needs_internal_relay()), not a second direct
+    # serial.Serial() on the same port already used by set_rover_mode
+    # below (and, in production, continuously read by str2str). The pty
+    # here only carries the "mode rover" command/response round-trip.
     master_fd, slave_path = fake_serial_pair
     app = _bare_app(rtcm_port=slave_path, nmea_port=slave_path, survey_duration=60)
 
@@ -332,10 +384,7 @@ def test_run_survey_in_reports_remaining_time_and_can_be_cancelled(fake_serial_p
 
     def feed():
         while not stop_feeding.is_set():
-            try:
-                os.write(master_fd, b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n")
-            except OSError:
-                return
+            app.broadcaster.broadcast(b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n")
             time.sleep(0.1)
 
     feeder = threading.Thread(target=feed, daemon=True)
@@ -343,10 +392,13 @@ def test_run_survey_in_reports_remaining_time_and_can_be_cancelled(fake_serial_p
 
     t = threading.Thread(target=app.run_survey_in, daemon=True)
     t.start()
-    # set_rover_mode (a serial command) can block for up to ~1s waiting
-    # for a response before the main loop starts: we wait beyond that
-    # margin to give time for the first countdown publish.
-    time.sleep(1.5)
+    # set_rover_mode (a serial command) can block for up to ~1.5s waiting
+    # for a response before the main loop starts (nothing writes one back
+    # here: the feeder now feeds GGA through the relay, not the pty, since
+    # this simulates the rtcm_port == nmea_port / relay-based reading
+    # path): we wait beyond that margin to give time for the first
+    # countdown publish.
+    time.sleep(2.2)
 
     remaining_values = [p for k, p in app.mqtt.published if k.endswith("survey_in_remaining/state")]
     assert remaining_values, "must publish the remaining time while it's running"

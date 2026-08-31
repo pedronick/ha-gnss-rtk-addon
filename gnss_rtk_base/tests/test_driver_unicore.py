@@ -17,6 +17,10 @@ def test_configure_rtcm_sends_expected_commands(fake_serial_pair):
         "log rtcm1087 ontime 1",
         "log rtcm1097 ontime 1",
         "log rtcm1127 ontime 1",
+        "log rtcm1019 ontime 15",
+        "log rtcm1020 ontime 15",
+        "log rtcm1042 ontime 15",
+        "log rtcm1046 ontime 15",
         "saveconfig",
     ]
 
@@ -29,10 +33,10 @@ def test_configure_nmea_sends_expected_commands(fake_serial_pair):
     time.sleep(0.3)
 
     assert commands == [
-        "log gga ontime 1",
-        "log gst ontime 1",
-        "log gsv ontime 1",
-        "log gsa ontime 1",
+        "log gpgga ontime 1",
+        "log gpgst ontime 1",
+        "log gpgsv ontime 1",
+        "log gpgsa ontime 1",
         "saveconfig",
     ]
 

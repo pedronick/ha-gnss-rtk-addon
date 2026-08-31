@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.9
+
+- Fix (Unicore driver): the NMEA log commands sent by `configure_nmea()`
+  ("log gga/gst/gsv/gsa ontime N") were rejected by a real UM982
+  ("PARSING FAILD GRAMMAR ERROR"); the talker prefix is required
+  ("gpgga"/"gpgst"/"gpgsv"/"gpgsa"), even though the module still outputs
+  multi-constellation $GNGGA/... sentences. Verified against real
+  hardware.
+- Added the RTCM ephemeris messages (1019/1020/1042/1046) to
+  `configure_rtcm()`, so a rover can reach a fix faster after a cold
+  start instead of waiting to decode ephemeris from its own signal.
+- Fix: when `rtcm_port == nmea_port` (the most common single-cable
+  setup, and the default in the example configuration), `str2str` and
+  the add-on's own NMEA monitor/survey-in were both opening the same
+  physical serial port at the same time, causing
+  `binary_sensor.device_connected` to flap ON/OFF every ~15-20s with
+  corrupted/lost NMEA - reproduced and verified on real hardware. NMEA
+  reading now goes through the same internal relay used by the local
+  NTRIP caster instead of a second direct connection to the port.
+
 ## 0.2.8
 
 - Added this changelog so the Home Assistant Add-on Store can show

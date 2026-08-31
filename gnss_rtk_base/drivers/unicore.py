@@ -30,13 +30,25 @@ def send_commands(port, baud, commands):
 
 
 def configure_rtcm(port, baud):
-    """Enables RTCM3 (station coordinates + MSM7 observations) on the given port."""
+    """Enables RTCM3 (station coordinates + MSM7 observations + broadcast
+    ephemeris) on the given port.
+
+    The ephemeris messages (1019/1020/1042/1046) aren't strictly required
+    for RTK (a rover normally tracks its own ephemeris), but including them
+    lets a rover reach a fix faster after a cold start instead of waiting
+    to decode ephemeris from its own signal. Sent at a slower rate than the
+    observations since they change rarely.
+    """
     send_commands(port, baud, [
         "log rtcm1005 ontime 10",
         "log rtcm1077 ontime 1",
         "log rtcm1087 ontime 1",
         "log rtcm1097 ontime 1",
         "log rtcm1127 ontime 1",
+        "log rtcm1019 ontime 15",
+        "log rtcm1020 ontime 15",
+        "log rtcm1042 ontime 15",
+        "log rtcm1046 ontime 15",
         "saveconfig",
     ])
 
@@ -48,12 +60,20 @@ def configure_nmea(port, baud):
 
     If rtcm_port == nmea_port, this function must be called after
     configure_rtcm() on the same port: the two message sets add up.
+
+    NOTE: verified against a real UM982 (firmware in use at the time of
+    writing): the bare message names ("log gga ontime 1", etc.) are
+    rejected with "PARSING FAILD GRAMMAR ERROR,ONTIME" - the "gp" talker
+    prefix is required in the log command itself (it still outputs
+    multi-constellation $GNGGA/$GNGSA/... sentences, the prefix is just
+    the command's mnemonic, not a GPS-only restriction). "gpgst" is
+    required too: "gngst" was tested and rejected the same way.
     """
     send_commands(port, baud, [
-        "log gga ontime 1",
-        "log gst ontime 1",
-        "log gsv ontime 1",
-        "log gsa ontime 1",
+        "log gpgga ontime 1",
+        "log gpgst ontime 1",
+        "log gpgsv ontime 1",
+        "log gpgsa ontime 1",
         "saveconfig",
     ])
 
