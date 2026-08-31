@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.10
+
+- Fix (PPP campaign): `run_ppp_campaign()`'s temp workdir was hardcoded
+  to `tempfile.TemporaryDirectory(dir="/data")` instead of being derived
+  from `RAW_LOG_DIR`, breaking outside a real container where `/data`
+  doesn't exist (found while testing the campaign against real
+  hardware/a local test harness).
+- Fix (PPP campaign): `fetch_precise_products()` only ever requested IGS
+  "final" (FIN) orbit/clock products, which are published ~11-18 days
+  after the fact - since the campaign processes the raw log right after
+  the logging window ends, FIN products for that date are essentially
+  never available yet, so the automatic campaign would fail every time
+  by default. It now falls back to "rapid" (RAP, ~17-41h latency) if FIN
+  isn't available, matching what the standalone `ppp_process.py` already
+  supports manually via `--product RAP`.
+
 ## 0.2.9
 
 - Fix (Unicore driver): the NMEA log commands sent by `configure_nmea()`

@@ -616,7 +616,13 @@ class App:
 
         self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
         try:
-            with tempfile.TemporaryDirectory(dir="/data") as workdir:
+            # Derived from RAW_LOG_DIR (not hardcoded "/data") so that
+            # monkeypatching main.RAW_LOG_DIR (as the test suite and the
+            # standalone test harness do, to run outside /data) also
+            # redirects this temp workdir - otherwise it silently kept
+            # trying to create it under the real "/data", which doesn't
+            # exist/isn't writable outside the container.
+            with tempfile.TemporaryDirectory(dir=str(Path(RAW_LOG_DIR).parent)) as workdir:
                 workdir = Path(workdir)
                 raw_files = ppp.collect_raw_files(RAW_LOG_DIR, start_ts, end_ts)
                 if not raw_files:

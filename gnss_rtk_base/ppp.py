@@ -141,21 +141,36 @@ def build_igs_names(date, product):
     return sp3, clk
 
 
-def fetch_precise_products(dates, workdir, product="FIN"):
+def fetch_precise_products(dates, workdir, products=("FIN", "RAP")):
     """Downloads SP3+CLK for each covered date, and the ANTEX file (once,
-    shared cache). Returns (sp3_list, clk_list, atx_path)."""
+    shared cache). Returns (sp3_list, clk_list, atx_path).
+
+    Tries each product tier in order (final first, then rapid) and uses
+    the first one where both SP3 and CLK download successfully. This
+    matters for the automatic PPP campaign (run_ppp_campaign): it
+    processes the raw log right after the logging window ends, when IGS
+    "final" products for that date are essentially never published yet
+    (published ~11-18 days later) - rapid products (~17-41h latency) are
+    the realistic fallback for a same-day/next-day campaign. Without
+    this, the automatic campaign would fail every time by default."""
     sp3_paths, clk_paths = [], []
     for date in dates:
         week, _ = gps_week_dow(date)
-        sp3_name, clk_name = build_igs_names(date, product)
-        sp3_gz = workdir / sp3_name
-        clk_gz = workdir / clk_name
-        sp3_urls = [f"{m.format(week=week)}/{sp3_name}" for m in SP3_CLK_MIRRORS]
-        clk_urls = [f"{m.format(week=week)}/{clk_name}" for m in SP3_CLK_MIRRORS]
-        if not try_download(sp3_urls, sp3_gz):
-            raise RuntimeError(f"SP3 download failed for {date}")
-        if not try_download(clk_urls, clk_gz):
-            raise RuntimeError(f"CLK download failed for {date}")
+        sp3_gz = clk_gz = None
+        for product in products:
+            sp3_name, clk_name = build_igs_names(date, product)
+            candidate_sp3 = workdir / sp3_name
+            candidate_clk = workdir / clk_name
+            sp3_urls = [f"{m.format(week=week)}/{sp3_name}" for m in SP3_CLK_MIRRORS]
+            clk_urls = [f"{m.format(week=week)}/{clk_name}" for m in SP3_CLK_MIRRORS]
+            if try_download(sp3_urls, candidate_sp3) and try_download(clk_urls, candidate_clk):
+                sp3_gz, clk_gz = candidate_sp3, candidate_clk
+                break
+            for stale in (candidate_sp3, candidate_clk):
+                stale.unlink(missing_ok=True)
+        if sp3_gz is None:
+            raise RuntimeError(
+                f"No IGS products available for {date} (tried: {', '.join(products)})")
         sp3_paths.append(gunzip(sp3_gz))
         clk_paths.append(gunzip(clk_gz))
 

@@ -2,6 +2,8 @@ import datetime as dt
 import gzip
 import re
 
+import pytest
+
 import ppp
 
 
@@ -23,6 +25,40 @@ def test_build_igs_names_final_and_rapid():
     sp3_rap, _ = ppp.build_igs_names(dt.date(2024, 1, 15), "RAP")
     assert "IGS0OPSRAP" in sp3_rap
     assert "15M" in sp3_rap
+
+
+def test_fetch_precise_products_falls_back_from_fin_to_rap(monkeypatch, tmp_path):
+    """The automatic PPP campaign processes the raw log right after
+    logging ends, when IGS "final" products for that date are basically
+    never published yet (~11-18 days latency) - it must fall back to
+    "rapid" (~17-41h latency) instead of failing outright."""
+    calls = []
+
+    def fake_try_download(urls, dest):
+        calls.append(dest.name)
+        if "IGS0OPSFIN" in dest.name:
+            return False  # simulates "not published yet"
+        with gzip.open(dest, "wb") as f:
+            f.write(b"fake product content")
+        return True
+
+    monkeypatch.setattr(ppp, "try_download", fake_try_download)
+    (tmp_path / "igs20.atx").write_bytes(b"fake atx")  # skip the real ANTEX download
+
+    sp3_paths, clk_paths, atx_path = ppp.fetch_precise_products([dt.date(2024, 1, 15)], tmp_path)
+
+    assert len(sp3_paths) == 1 and len(clk_paths) == 1
+    assert "IGS0OPSRAP" in sp3_paths[0].name
+    assert sp3_paths[0].read_bytes() == b"fake product content"
+    assert any("IGS0OPSFIN" in c for c in calls), "must try FIN first"
+    assert any("IGS0OPSRAP" in c for c in calls), "must fall back to RAP"
+
+
+def test_fetch_precise_products_raises_when_no_tier_available(monkeypatch, tmp_path):
+    monkeypatch.setattr(ppp, "try_download", lambda urls, dest: False)
+
+    with pytest.raises(RuntimeError, match="No IGS products available"):
+        ppp.fetch_precise_products([dt.date(2024, 1, 15)], tmp_path)
 
 
 def test_collect_raw_files_filters_by_time_window(tmp_path):
