@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.12
+
+- Added `reset(port, baud)` to the driver contract (`drivers/base.py`),
+  called by `configure_receiver()` before `configure_rtcm()`/
+  `configure_nmea()`. For Unicore it sends `unlogall`, clearing any
+  message previously enabled outside of what this add-on manages (e.g.
+  during a manual test) - those "log" commands are purely additive and
+  were never cleared before. Verified on real hardware: enabled an
+  unrelated message manually, confirmed it kept streaming after a normal
+  `configure_rtcm`/`configure_nmea`, then confirmed `reset()` makes it
+  disappear while GGA/GST/GSV/GSA/RTCM keep working normally.
+  Deliberately does not touch base/rover mode, so a receiver already
+  configured as a fixed base isn't reverted to rover on every add-on
+  restart. The u-blox driver's `reset()` is a documented no-op (its
+  `configure_rtcm`/`configure_nmea` already overwrite specific message
+  rates by ID, nothing accumulates the way Unicore's "log" list does).
+
 ## 0.2.11
 
 - Fix (PPP campaign, critical): the IGS product download had never

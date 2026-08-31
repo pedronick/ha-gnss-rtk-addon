@@ -107,6 +107,21 @@ def _cfg_msg(ser, msg_class, msg_id, rate):
     _send(ser, *CFG_MSG, bytes([msg_class, msg_id, rate]))
 
 
+def reset(port, baud):
+    """No-op for this driver, unlike drivers/unicore.py's reset(). Unicore
+    needs it because its "log" commands are purely additive (an old
+    manually-enabled message keeps streaming forever unless explicitly
+    cleared with "unlogall"). This driver instead sets an explicit rate
+    for each message ID it manages via UBX-CFG-MSG in configure_rtcm()/
+    configure_nmea() - calling those already authoritatively overwrites
+    the rate for exactly those IDs, with nothing left to separately
+    clear. A real factory-reset command exists (UBX-CFG-CFG, reverting
+    RAM+BBR+Flash config layers) but isn't used here: it would also wipe
+    unrelated settings (e.g. dynamic model, RF calibration) and hasn't
+    been verified against real ZED-F9P/M8P hardware (see the module
+    warning above) - safer to leave it as a documented no-op than guess."""
+
+
 def configure_rtcm(port, baud):
     with serial.Serial(port, baud, timeout=1) as ser:
         for rtcm_type, ubx_id in RTCM_MSG_IDS.items():

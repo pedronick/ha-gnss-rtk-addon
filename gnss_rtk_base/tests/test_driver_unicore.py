@@ -4,6 +4,16 @@ import drivers.unicore as unicore
 from serial_capture import start_ascii_capture
 
 
+def test_reset_sends_unlogall(fake_serial_pair):
+    master_fd, slave_path = fake_serial_pair
+    commands = start_ascii_capture(master_fd)
+
+    unicore.reset(slave_path, 115200)
+    time.sleep(0.3)
+
+    assert commands == ["unlogall"]
+
+
 def test_configure_rtcm_sends_expected_commands(fake_serial_pair):
     master_fd, slave_path = fake_serial_pair
     commands = start_ascii_capture(master_fd)

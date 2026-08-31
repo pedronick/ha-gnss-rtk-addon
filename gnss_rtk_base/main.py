@@ -124,7 +124,9 @@ class App:
         print(f"[main] device status: {status}", flush=True)
 
     def configure_receiver(self):
-        """Configures RTCM and NMEA on the module, waiting for the serial
+        """Resets any leftover message/log configuration (driver.reset(),
+        see drivers/unicore.py for why this matters on that driver) and
+        configures RTCM and NMEA on the module, waiting for the serial
         ports to exist (useful if the USB is not yet enumerated when the
         add-on starts) and retrying on error instead of crashing the
         whole add-on."""
@@ -133,6 +135,7 @@ class App:
 
         while True:
             try:
+                self.driver.reset(self.rtcm_port, self.baud)
                 self.driver.configure_rtcm(self.rtcm_port, self.baud)
                 if self.nmea_port != self.rtcm_port:
                     time.sleep(0.5)

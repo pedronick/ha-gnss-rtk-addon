@@ -18,7 +18,7 @@ def test_get_driver_raises_on_unknown_name():
 
 
 def test_every_driver_exposes_the_required_contract():
-    required = ("configure_rtcm", "configure_nmea", "set_rover_mode", "set_fixed_base")
+    required = ("reset", "configure_rtcm", "configure_nmea", "set_rover_mode", "set_fixed_base")
     for name, module in drivers.DRIVERS.items():
         for fn_name in required:
             assert hasattr(module, fn_name), f"{name} is missing {fn_name}"

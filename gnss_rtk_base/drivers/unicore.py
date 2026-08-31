@@ -29,6 +29,24 @@ def send_commands(port, baud, commands):
                 print("[unicore] <<", resp.decode("ascii", errors="replace").strip(), flush=True)
 
 
+def reset(port, baud):
+    """Clears any log/message output previously configured on the module
+    ("unlogall"), so configure_rtcm()/configure_nmea() start from a known
+    clean state instead of adding to whatever was left over from a prior
+    session (e.g. a stray message enabled during a manual test, still
+    being streamed after the add-on takes over) - "log" commands are
+    purely additive and are never cleared by configure_rtcm/configure_nmea
+    themselves.
+
+    Deliberately does NOT touch the base/rover mode ("mode base"/"mode
+    rover"): a receiver already configured as a fixed base from a
+    previous successful survey-in/PPP campaign persists that mode across
+    power cycles via its own saveconfig, and this runs on every add-on
+    startup - forcing "mode rover" here would silently revert a working
+    production base station to rover mode on every restart."""
+    send_commands(port, baud, ["unlogall"])
+
+
 def configure_rtcm(port, baud):
     """Enables RTCM3 (station coordinates + MSM7 observations + broadcast
     ephemeris) on the given port.

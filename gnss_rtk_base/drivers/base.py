@@ -5,7 +5,20 @@ This is deliberately not an abstract base class: the drivers in this
 project are modules with functions of the same name, not instances —
 simpler to read/extend for a project of this size. This file only
 documents the required signature; every driver in this package must
-expose exactly these four functions:
+expose exactly these five functions:
+
+    reset(port: str, baud: int) -> None
+        Clears any message/log output previously configured on the
+        receiver (from a prior manual test, a previous version of this
+        add-on, etc.) before configure_rtcm()/configure_nmea() enable
+        exactly what's needed. Without this, leftover configuration can
+        accumulate silently across add-on restarts/reconfigurations -
+        found on real UM982 hardware still emitting stray messages from
+        an unrelated earlier session. If the receiver has nothing
+        meaningful to clear (e.g. because configure_rtcm/configure_nmea
+        already fully overwrite the specific messages it manages, one by
+        one, rather than accumulating a log list), a no-op is a valid
+        implementation - see drivers/ublox.py for why.
 
     configure_rtcm(port: str, baud: int) -> None
         Enables on the given port the minimum RTCM3 output required by
