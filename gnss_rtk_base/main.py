@@ -261,6 +261,16 @@ class App:
                 return  # restarted by the watchdog: this thread is stale
             m = STR2STR_STATUS_RE.search(line)
             if not m:
+                # Not a periodic status line - most likely a fatal
+                # startup error (e.g. "openserial: device busy", wrong
+                # port). Previously silently dropped here, which meant
+                # str2str's actual failure reason never appeared
+                # anywhere, only "terminated unexpectedly, restarting..."
+                # from the watchdog - found while diagnosing a real
+                # crash-loop where the cause was invisible in the logs.
+                stripped = line.rstrip("\n")
+                if stripped:
+                    print(f"[str2str] {stripped}", flush=True)
                 continue
             statuses = m.group("statuses")
             self.mqtt.publish(f"{BASE}/rtcm_bps/state", int(m.group("bps")), retain=True)

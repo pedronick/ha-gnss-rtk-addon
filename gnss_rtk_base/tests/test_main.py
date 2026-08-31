@@ -178,6 +178,30 @@ def test_monitor_str2str_status_parses_real_status_line_format():
     assert published["gnssbase/str2str_diagnostics/state"] == "(1) recv error (111)"
 
 
+def test_monitor_str2str_status_prints_fatal_startup_errors(capsys):
+    """A fatal startup error (e.g. "device busy", wrong port) doesn't
+    match the periodic status-line format and was previously silently
+    dropped - found while diagnosing a real crash-loop where
+    watchdog_str2str's generic "terminated unexpectedly, restarting..."
+    was the only visible message, with no clue why. Real lines from a
+    real str2str given a nonexistent port: "stream server start" /
+    "stream server start error", both on stderr."""
+    app = _bare_app()
+
+    class FakeProc:
+        args = ["str2str"]
+        stderr = iter(["stream server start\n", "stream server start error\n"])
+
+    fake_proc = FakeProc()
+    app.str2str_proc = fake_proc
+    app.monitor_str2str_status(fake_proc)
+
+    out = capsys.readouterr().out
+    assert "[str2str] stream server start" in out
+    assert "[str2str] stream server start error" in out
+    assert app.mqtt.published == []  # not a status line: no MQTT entity should be touched
+
+
 @pytest.mark.skipif(shutil.which("str2str") is None, reason="requires the RTKLIB str2str binary in PATH")
 def test_monitor_str2str_status_against_real_str2str_binary(fake_serial_pair, tmp_path):
     """Real (non-simulated) integration: runs the actual str2str with one

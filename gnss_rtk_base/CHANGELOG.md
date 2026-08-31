@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.13
+
+- Fix: `monitor_str2str_status()` silently dropped every `str2str`
+  stderr line that wasn't the periodic status line - including fatal
+  startup errors (e.g. a busy/wrong serial port). Found while diagnosing
+  a real crash-loop on a user's Home Assistant instance where the only
+  visible message was the watchdog's generic "str2str terminated
+  unexpectedly, restarting...", repeated forever with no clue why.
+  Non-matching lines are now printed as `[str2str] ...` so the real
+  reason shows up in the add-on log. Verified locally against a real
+  `str2str` given a nonexistent port (prints "stream server start" /
+  "stream server start error" on stderr, exactly what was being lost).
+
 ## 0.2.12
 
 - Added `reset(port, baud)` to the driver contract (`drivers/base.py`),
