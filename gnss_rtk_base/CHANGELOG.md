@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.17
+
+- Feature: the PPP campaign no longer fails outright when IGS products
+  aren't published yet for such a recent date (a near-certainty for a
+  same-day campaign: "final" products take ~11-18 days, "rapid" ones
+  ~17-41 hours). It now converts the raw log to RINEX right away (no
+  network needed for that part), and if the product download isn't ready,
+  moves to a new `waiting_for_products` state and retries automatically
+  every hour, bounded by `raw_log_retention_hours` (retrying past that
+  point is pointless: the source raw log will already have been deleted
+  by the periodic cleanup by then). `sensor.ppp_campaign_time_remaining`
+  keeps counting down during the wait, and `button.cancel_ppp_campaign`
+  still works. See the README's "waiting_for_products" section for what
+  this means for `raw_log_retention_hours` sizing.
+
 ## 0.2.16
 
 - Fix (PPP campaign): `try_download()` accepted any HTTP 200 response

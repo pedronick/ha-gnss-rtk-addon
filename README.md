@@ -16,10 +16,10 @@ supports u-blox ZED-F9P/M8P, and can support others with a new module in
   - `sensor.survey_in` — idle / running / done / error / **cancelled** (quick average, metric-level)
   - `button.start_survey_in` / `button.cancel_survey_in`
   - `sensor.survey_in_time_remaining` (seconds, updated every second while running)
-  - `sensor.ppp_campaign` — idle / logging / processing / done / error / **cancelled**
+  - `sensor.ppp_campaign` — idle / logging / processing / **waiting_for_products** / done / error / **cancelled**
   - `number.ppp_campaign_duration` (hours)
   - `button.start_ppp_campaign` / `button.cancel_ppp_campaign` — PPP-static processing over multi-hour raw logs (centimeter-level)
-  - `sensor.ppp_campaign_time_remaining` (seconds, updated every second during the logging phase)
+  - `sensor.ppp_campaign_time_remaining` (seconds, updated every second during the logging phase and during `waiting_for_products`)
   - `number.manual_latitude` / `manual_longitude` / `manual_height`
   - `button.apply_manual_position`
   - `sensor.local_caster_connected_rovers` (only if `caster_enabled: true`)
@@ -324,13 +324,36 @@ in seconds, updated every second) and can be interrupted with
 `button.cancel_survey_in` / `button.cancel_ppp_campaign`: the state moves
 to `cancelled` and **no position is applied to the receiver**.
 
-Known limit: for the PPP campaign, cancellation only works during the
-`logging` phase (the wait that accumulates the raw log). Once it moves to
-the `processing` phase (RINEX conversion + IGS product download + PPP),
-the campaign runs to completion — interrupting it midway would risk
-leaving inconsistent temporary files mid-processing. In practice this
-isn't a strict limitation: the `processing` phase typically lasts a few
-minutes compared to the hours-long `logging` phase.
+For the PPP campaign, cancellation works during `logging` and during
+`waiting_for_products` (see below) — the two phases that can run for a
+long time. It does not work during the brief, purely computational parts
+of `processing` (RINEX conversion, then PPP once products are available):
+interrupting those midway would risk leaving inconsistent temporary
+files. In practice this isn't a limitation: those parts typically take a
+few minutes each.
+
+#### If IGS products aren't published yet: `waiting_for_products`
+
+IGS precise products aren't available immediately: "final" products
+(most precise) are published ~11-18 days after the observation date,
+"rapid" products (the automatic fallback, see below) after ~17-41 hours.
+If a campaign finishes logging and processing (RINEX conversion) but the
+products for that date aren't out yet, `sensor.ppp_campaign` moves to
+`waiting_for_products` instead of failing outright, and the campaign
+retries the download automatically every hour. The wait is bounded by
+`raw_log_retention_hours`: retrying past that point would be pointless,
+since the source raw log will already have been deleted by the periodic
+cleanup by then. `sensor.ppp_campaign_time_remaining` keeps counting down
+during this phase too (time left until that bound), and
+`button.cancel_ppp_campaign` still works.
+
+In practice this means: for a campaign to complete automatically without
+manual intervention, plan for it to keep the add-on's `raw_log_retention_hours`
+comfortably larger than "campaign duration + expected product latency"
+(the default 72h covers a same-day campaign followed by up to ~41h of
+waiting for rapid products; final products, at 11-18 days, will not be
+reached automatically at default settings — see `ppp_process.py` for
+reprocessing an old log manually once they're out).
 
 ### Backup of the computed position
 

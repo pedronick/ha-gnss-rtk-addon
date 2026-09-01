@@ -1,3 +1,4 @@
+import datetime as dt
 import os
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ import caster
 import drivers
 import main
 import position_backup
+import ppp
 from state import SharedState
 
 
@@ -468,6 +470,104 @@ def test_run_ppp_campaign_reports_remaining_time_and_can_be_cancelled(monkeypatc
     assert states[-1] == "cancelled"
     remaining_values = [p for k, p in app.mqtt.published if k.endswith("ppp_remaining/state")]
     assert remaining_values[-1] == 0
+
+
+def _mock_ppp_pipeline_up_to_products(monkeypatch, fetch_precise_products):
+    """Mocks every ppp.* step except fetch_precise_products (the caller
+    supplies that one, to control whether/when it succeeds)."""
+    monkeypatch.setattr(ppp, "collect_raw_files", lambda *a, **k: ["fake.rtcm3"])
+    monkeypatch.setattr(ppp, "concat_raw_files", lambda *a, **k: None)
+    monkeypatch.setattr(ppp, "convbin", lambda *a, **k: ("obs", "nav"))
+    monkeypatch.setattr(ppp, "parse_obs_dates", lambda *a, **k: [dt.date(2024, 1, 15)])
+    monkeypatch.setattr(ppp, "fetch_precise_products", fetch_precise_products)
+    monkeypatch.setattr(ppp, "run_rnx2rtkp", lambda *a, **k: "pos")
+    monkeypatch.setattr(ppp, "parse_last_position", lambda *a, **k: (45.0, 9.0, 100.0))
+
+
+def test_run_ppp_campaign_waits_for_products_then_completes(monkeypatch, tmp_path):
+    """Regression: a real campaign used to fail outright ("error") the
+    moment IGS products weren't published yet for such a recent date,
+    instead of waiting - found from a real run on a user's Home Assistant
+    instance. Simulates products becoming available on the third
+    attempt."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "PPP_PRODUCT_RETRY_INTERVAL_S", 0.2)
+    monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
+
+    attempts = []
+
+    def fake_fetch(dates, workdir):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise RuntimeError("not published yet")
+        return (["sp3"], ["clk"], "atx")
+
+    _mock_ppp_pipeline_up_to_products(monkeypatch, fake_fetch)
+
+    app = _bare_app(ppp_duration_hours=1 / 3600, raw_log_retention_hours=72)
+    monkeypatch.setattr(app.driver, "set_fixed_base", lambda *a, **k: None)
+
+    app.run_ppp_campaign()
+
+    assert len(attempts) == 3
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert "waiting_for_products" in states
+    assert states[-1] == "done"
+    assert app.manual_lat == 45.0
+
+
+def test_run_ppp_campaign_can_be_cancelled_while_waiting_for_products(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "PPP_PRODUCT_RETRY_INTERVAL_S", 5)
+
+    def always_fails(dates, workdir):
+        raise RuntimeError("not published yet")
+
+    _mock_ppp_pipeline_up_to_products(monkeypatch, always_fails)
+
+    app = _bare_app(ppp_duration_hours=1 / 3600, raw_log_retention_hours=72)
+
+    t = threading.Thread(target=app.run_ppp_campaign, daemon=True)
+    t.start()
+    # wait for the state to reach waiting_for_products before cancelling
+    for _ in range(50):
+        states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+        if states and states[-1] == "waiting_for_products":
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("campaign never reached waiting_for_products")
+
+    app.cancel_ppp_campaign()
+    t.join(timeout=5)
+
+    assert not t.is_alive()
+    assert not app.ppp_running
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert states[-1] == "cancelled"
+
+
+def test_run_ppp_campaign_errors_once_retention_window_closes(monkeypatch, tmp_path):
+    """If IGS products still aren't available by the time the raw log
+    itself would already have been deleted (raw_log_retention_hours after
+    the campaign ended), retrying further is pointless: gives up with a
+    clear error instead of waiting forever."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "PPP_PRODUCT_RETRY_INTERVAL_S", 0.2)
+
+    def always_fails(dates, workdir):
+        raise RuntimeError("not published yet")
+
+    _mock_ppp_pipeline_up_to_products(monkeypatch, always_fails)
+
+    # raw_log_retention_hours so small that the wait deadline is already
+    # in the past by the time the first retry check runs.
+    app = _bare_app(ppp_duration_hours=1 / 3600, raw_log_retention_hours=0)
+    app.run_ppp_campaign()
+
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert states[-1] == "error"
+    assert not app.ppp_running
 
 
 def test_cancel_ppp_campaign_is_noop_when_not_running():
