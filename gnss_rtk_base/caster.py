@@ -4,11 +4,22 @@ NTRIP clients) built into the add-on: rovers connect directly to this
 add-on instead of to an external caster.
 
 RTCM3 bytes arrive from str2str via an extra output
-"-out tcpcli://127.0.0.1:INTERNAL_RELAY_PORT" (str2str connects to us and
-forwards the stream to us), which is then re-distributed here to all
+"-out tcpsvr://:INTERNAL_RELAY_PORT" (str2str listens, we connect to it
+as a client and read), which is then re-distributed here to all
 connected rovers. No process reads the serial port more than once: it's
 always str2str that does it, consistent with the same principle used for
 external casters and for the raw log of the PPP campaign.
+
+Why str2str is the server and we're the client here, not the other way
+around (which would arguably be the more obvious design): RTKLIB's
+"tcpcli" (client) stream type crashes with a real SIGSEGV on Alpine/musl
+(the base image used to build this add-on) - reproduced with a real
+build and a debugger: gentcp()'s client branch in stream.c calls the
+legacy, non-getaddrinfo gethostbyname() to resolve the target address,
+even a plain numeric IP like 127.0.0.1, and that corrupts memory on
+musl. "tcpsvr" (the server role) never calls gethostbyname() at all, so
+it's unaffected - confirmed by reproducing the crash and the fix in a
+real container from this project's own Dockerfile.
 """
 
 import base64
@@ -18,6 +29,7 @@ import time
 
 INTERNAL_RELAY_PORT = 28101
 CASTER_PORT = 2101
+RELAY_RETRY_INTERVAL_S = 2
 
 # Minimal hardening against mountpoint password brute-forcing: after too
 # many failed attempts in a short time, the IP is blocked for a cooldown
@@ -58,26 +70,41 @@ class Broadcaster:
 
 
 def run_relay_receiver(broadcaster):
-    """Accepts the connection from str2str and forwards every byte
-    received to the connected rovers. If str2str restarts (watchdog), it
-    accepts a new connection without needing to restart this service."""
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", INTERNAL_RELAY_PORT))
-    srv.listen(1)
-    print(f"[caster] internal relay listening on 127.0.0.1:{INTERNAL_RELAY_PORT}", flush=True)
+    """Connects to str2str's own TCP server (str2str -out
+    tcpsvr://:INTERNAL_RELAY_PORT, see the module docstring for why
+    str2str is the server and we're the client here) and forwards every
+    byte received to the connected rovers. Retries periodically if
+    str2str isn't listening yet (still starting) or the connection drops
+    (e.g. a restart via watchdog_str2str), without ever giving up.
+
+    Captures INTERNAL_RELAY_PORT once, at the start, rather than
+    re-reading the module global on every retry: this only matters for
+    tests, which run multiple independent instances of this add-on in
+    the same process and reassign the global each time via
+    caster.INTERNAL_RELAY_PORT = ... - without this, an earlier test's
+    still-running (daemon) retry loop would start reconnecting to a
+    later test's port as soon as the global changed underneath it,
+    fighting over the same accept() queue."""
+    port = INTERNAL_RELAY_PORT
     while True:
-        conn, _ = srv.accept()
-        print("[caster] str2str connected to the internal relay", flush=True)
+        try:
+            conn = socket.create_connection(("127.0.0.1", port), timeout=RELAY_RETRY_INTERVAL_S)
+        except OSError:
+            time.sleep(RELAY_RETRY_INTERVAL_S)
+            continue
+        print("[caster] connected to str2str's internal relay", flush=True)
         try:
             while True:
                 data = conn.recv(4096)
                 if not data:
                     break
                 broadcaster.broadcast(data)
+        except OSError:
+            pass  # e.g. connection reset by a str2str restart - just reconnect below
         finally:
             conn.close()
-            print("[caster] str2str disconnected from the internal relay, waiting for reconnection", flush=True)
+            print("[caster] disconnected from str2str's internal relay, retrying...", flush=True)
+        time.sleep(RELAY_RETRY_INTERVAL_S)
 
 
 class AuthRateLimiter:

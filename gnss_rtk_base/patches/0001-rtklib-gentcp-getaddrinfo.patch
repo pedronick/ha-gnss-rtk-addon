@@ -1,0 +1,51 @@
+diff --git a/src/stream.c b/src/stream.c
+index 363cc37..2396070 100644
+--- a/src/stream.c
++++ b/src/stream.c
+@@ -75,6 +75,12 @@
+ *                           suppress warning for buffer overflow by sprintf()
+ *                           use integer types in stdint.h
+ *-----------------------------------------------------------------------------*/
++#ifndef WIN32
++/* needed for getaddrinfo()/struct addrinfo (gentcp() in this file) under
++   -ansi -pedantic on glibc; must be defined before the first system
++   header. musl exposes these regardless, but this is harmless there. */
++#define _POSIX_C_SOURCE 200112L
++#endif
+ #include <ctype.h>
+ #include "rtklib.h"
+ #ifndef WIN32
+@@ -1085,7 +1091,6 @@ static int send_nb(socket_t sock, uint8_t *buff, int n)
+ /* generate tcp socket -------------------------------------------------------*/
+ static int gentcp(tcp_t *tcp, int type, char *msg)
+ {
+-    struct hostent *hp;
+ #ifdef SVR_REUSEADDR
+     int opt=1;
+ #endif
+@@ -1124,16 +1129,22 @@ static int gentcp(tcp_t *tcp, int type, char *msg)
+         listen(tcp->sock,5);
+     }
+     else { /* client socket */
+-        if (!(hp=gethostbyname(tcp->saddr))) {
++        struct addrinfo hints,*res;
++        memset(&hints,0,sizeof(hints));
++        hints.ai_family=AF_INET;
++        hints.ai_socktype=SOCK_STREAM;
++        if (getaddrinfo(tcp->saddr,NULL,&hints,&res)!=0||!res) {
+             sprintf(msg,"address error (%s)",tcp->saddr);
+-            tracet(1,"gentcp: gethostbyname error addr=%s err=%d\n",tcp->saddr,errsock());
++            tracet(1,"gentcp: getaddrinfo error addr=%s err=%d\n",tcp->saddr,errsock());
+             closesocket(tcp->sock);
+             tcp->state=0;
+             tcp->tcon=ticonnect;
+             tcp->tdis=tickget();
+             return 0;
+         }
+-        memcpy(&tcp->addr.sin_addr,hp->h_addr,hp->h_length);
++        memcpy(&tcp->addr.sin_addr,&((struct sockaddr_in *)res->ai_addr)->sin_addr,
++               sizeof(tcp->addr.sin_addr));
++        freeaddrinfo(res);
+     }
+     tcp->state=1;
+     tcp->tact=tickget();

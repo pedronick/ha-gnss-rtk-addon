@@ -98,9 +98,9 @@ def test_build_str2str_cmd_does_not_shadow_caster_module():
     )
     cmd = app.build_str2str_cmd()
     outs = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "-out"]
-    relay_outs = [o for o in outs if o.startswith("tcpcli://127.0.0.1:")]
+    relay_outs = [o for o in outs if o.startswith("tcpsvr://:")]
     assert len(relay_outs) == 1
-    assert relay_outs[0] == f"tcpcli://127.0.0.1:{caster.INTERNAL_RELAY_PORT}"
+    assert relay_outs[0] == f"tcpsvr://:{caster.INTERNAL_RELAY_PORT}"
 
 
 def test_build_str2str_cmd_without_any_caster_configured():

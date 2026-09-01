@@ -1,5 +1,6 @@
 import base64
 import socket
+import struct
 import threading
 import time
 
@@ -13,10 +14,20 @@ def _free_port():
 
 
 def _start_caster(mountpoint="TEST", user="", password="", max_clients=None, limiter=None):
+    """Starts a fake "str2str" TCP server on relay_port (run_relay_receiver
+    is a client that connects to it, see caster.py's module docstring for
+    why the roles are reversed from what you'd expect) plus the real
+    caster_server under test."""
     relay_port = _free_port()
     caster_port = _free_port()
     caster.INTERNAL_RELAY_PORT = relay_port
     broadcaster = caster.Broadcaster()
+
+    fake_str2str_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fake_str2str_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    fake_str2str_srv.bind(("127.0.0.1", relay_port))
+    fake_str2str_srv.listen(1)
+
     threading.Thread(target=caster.run_relay_receiver, args=(broadcaster,), daemon=True).start()
     threading.Thread(
         target=caster.run_caster_server,
@@ -24,11 +35,11 @@ def _start_caster(mountpoint="TEST", user="", password="", max_clients=None, lim
         daemon=True,
     ).start()
     time.sleep(0.2)
-    return broadcaster, relay_port, caster_port
+    return broadcaster, relay_port, caster_port, fake_str2str_srv
 
 
 def test_wrong_mountpoint_returns_sourcetable():
-    _, _, caster_port = _start_caster(mountpoint="GNSSBASE")
+    _, _, caster_port, _ = _start_caster(mountpoint="GNSSBASE")
     s = socket.create_connection(("127.0.0.1", caster_port), timeout=2)
     s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
     resp = s.recv(4096)
@@ -38,7 +49,7 @@ def test_wrong_mountpoint_returns_sourcetable():
 
 
 def test_missing_auth_returns_401():
-    _, _, caster_port = _start_caster(mountpoint="GNSSBASE", user="user", password="pass")
+    _, _, caster_port, _ = _start_caster(mountpoint="GNSSBASE", user="user", password="pass")
     s = socket.create_connection(("127.0.0.1", caster_port), timeout=2)
     s.sendall(b"GET /GNSSBASE HTTP/1.1\r\nHost: x\r\n\r\n")
     resp = s.recv(4096)
@@ -47,7 +58,8 @@ def test_missing_auth_returns_401():
 
 
 def test_correct_auth_relays_rtcm_bytes():
-    broadcaster, relay_port, caster_port = _start_caster(mountpoint="GNSSBASE", user="user", password="pass")
+    broadcaster, relay_port, caster_port, fake_str2str_srv = _start_caster(
+        mountpoint="GNSSBASE", user="user", password="pass")
 
     rover = socket.create_connection(("127.0.0.1", caster_port), timeout=2)
     auth = base64.b64encode(b"user:pass").decode()
@@ -58,7 +70,10 @@ def test_correct_auth_relays_rtcm_bytes():
     time.sleep(0.2)
     assert broadcaster.num_clients() == 1
 
-    upstream = socket.create_connection(("127.0.0.1", relay_port), timeout=2)
+    # run_relay_receiver already connected in to fake_str2str_srv as a
+    # client (see its module docstring for why the roles are reversed).
+    fake_str2str_srv.settimeout(2)
+    upstream, _ = fake_str2str_srv.accept()
     payload = b"\xd3\x00\x13FAKE_RTCM_PAYLOAD_1234"
     upstream.sendall(payload)
     time.sleep(0.2)
@@ -68,8 +83,43 @@ def test_correct_auth_relays_rtcm_bytes():
     upstream.close()
 
 
+def test_relay_receiver_reconnects_after_abrupt_disconnect(monkeypatch):
+    """Regression: an unhandled ConnectionResetError from recv() (e.g. the
+    str2str side dying/restarting mid-stream, not a clean close) used to
+    kill run_relay_receiver's thread silently - it never reconnected
+    again. Simulates that by closing str2str's end of the connection
+    (RST-like from the receiver's point of view), and checks the relay
+    reconnects on its own and keeps working."""
+    monkeypatch.setattr(caster, "RELAY_RETRY_INTERVAL_S", 0.2)
+    relay_port = _free_port()
+    caster.INTERNAL_RELAY_PORT = relay_port
+    broadcaster = caster.Broadcaster()
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", relay_port))
+    srv.listen(1)
+    srv.settimeout(5)
+    threading.Thread(target=caster.run_relay_receiver, args=(broadcaster,), daemon=True).start()
+
+    first, _ = srv.accept()
+    first.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    first.close()  # abrupt: triggers RST instead of a clean FIN
+
+    second, _ = srv.accept()  # run_relay_receiver must reconnect by itself
+    rover_pub, rover_priv = socket.socketpair()
+    broadcaster.add_client(rover_pub)
+    second.sendall(b"still working after reconnect")
+    time.sleep(0.3)
+    assert rover_priv.recv(4096) == b"still working after reconnect"
+
+    second.close()
+    rover_pub.close()
+    rover_priv.close()
+
+
 def test_no_auth_required_when_credentials_empty():
-    _, _, caster_port = _start_caster(mountpoint="GNSSBASE", user="", password="")
+    _, _, caster_port, _ = _start_caster(mountpoint="GNSSBASE", user="", password="")
     s = socket.create_connection(("127.0.0.1", caster_port), timeout=2)
     s.sendall(b"GET /GNSSBASE HTTP/1.1\r\nHost: x\r\n\r\n")
     resp = s.recv(4096)
@@ -120,7 +170,7 @@ def test_repeated_failed_auth_gets_blocked_end_to_end():
     further attempts are rejected immediately, even with the correct
     password in the meantime."""
     limiter = caster.AuthRateLimiter(max_failures=2, window_s=10, block_duration_s=5)
-    _, _, caster_port = _start_caster(mountpoint="GNSSBASE", user="user", password="pass", limiter=limiter)
+    _, _, caster_port, _ = _start_caster(mountpoint="GNSSBASE", user="user", password="pass", limiter=limiter)
 
     for _ in range(2):
         resp = _auth_get(caster_port, "GNSSBASE", user="user", password="wrong")
@@ -132,7 +182,7 @@ def test_repeated_failed_auth_gets_blocked_end_to_end():
 
 
 def test_max_clients_limit_rejects_extra_connections():
-    _, _, caster_port = _start_caster(mountpoint="GNSSBASE", max_clients=1)
+    _, _, caster_port, _ = _start_caster(mountpoint="GNSSBASE", max_clients=1)
 
     first = socket.create_connection(("127.0.0.1", caster_port), timeout=2)
     first.sendall(b"GET /GNSSBASE HTTP/1.1\r\nHost: x\r\n\r\n")

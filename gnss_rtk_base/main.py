@@ -151,7 +151,7 @@ class App:
         return [c for c in self.ntrip_casters if c.get("host")]
 
     def needs_internal_relay(self):
-        """Whether str2str needs an extra -out tcpcli://127.0.0.1:... feeding
+        """Whether str2str needs an extra -out tcpsvr://:... feeding
         caster.py's internal relay (see build_str2str_cmd/run()). True if the
         local NTRIP caster is enabled (rovers need the byte stream), or if
         rtcm_port == nmea_port: in that case str2str is already the sole
@@ -227,11 +227,15 @@ class App:
         # every hour).
         cmd += ["-out", f"file://{RAW_LOG_DIR}/gnssbase_%Y%m%d%h.rtcm3"]
         if self.needs_internal_relay():
-            # str2str connects to our internal relay (caster.py) and
-            # forwards the stream to us. Consumers: connected rovers (if
-            # caster_enabled) and/or our own NMEA monitor/survey-in (if
-            # rtcm_port == nmea_port, see needs_internal_relay()).
-            cmd += ["-out", f"tcpcli://127.0.0.1:{caster.INTERNAL_RELAY_PORT}"]
+            # str2str listens as a TCP server and caster.py's
+            # run_relay_receiver() connects to it as a client (backwards
+            # from what you'd expect - see that function's docstring:
+            # RTKLIB's tcpcli client role crashes with a real SIGSEGV on
+            # Alpine/musl, tcpsvr doesn't). Consumers of the relayed
+            # bytes: connected rovers (if caster_enabled) and/or our own
+            # NMEA monitor/survey-in (if rtcm_port == nmea_port, see
+            # needs_internal_relay()).
+            cmd += ["-out", f"tcpsvr://:{caster.INTERNAL_RELAY_PORT}"]
         return cmd
 
     def start_str2str(self):
@@ -733,7 +737,7 @@ class App:
         character device - verified on real hardware: without this,
         device_connected flapped ON/OFF every ~15-20s with corrupted/lost
         NMEA. Instead, subscribe as a client of the same internal relay
-        used for the local NTRIP caster (str2str -out tcpcli://... ->
+        used for the local NTRIP caster (str2str -out tcpsvr://... ->
         caster.run_relay_receiver), which carries the raw byte stream
         unfiltered: str2str relays bytes verbatim, so RTCM3 and NMEA
         arrive interleaved on it (verified against a real capture
@@ -801,8 +805,9 @@ class App:
         else:
             self.mqtt.publish(f"{BASE}/config_error/state", "", retain=True)
             if self.needs_internal_relay():
-                # Started before str2str so the relay is already listening
-                # when str2str's -out tcpcli:// tries to connect to it.
+                # run_relay_receiver() connects to str2str's own
+                # tcpsvr://... as a client and retries until it's up, so
+                # start order relative to start_str2str() doesn't matter.
                 threading.Thread(target=caster.run_relay_receiver, args=(self.broadcaster,), daemon=True).start()
             self.start_str2str()
             threading.Thread(target=self.watchdog_str2str, daemon=True).start()

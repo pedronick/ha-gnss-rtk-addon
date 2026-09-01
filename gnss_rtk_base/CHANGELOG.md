@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.15
+
+- **Critical fix**: `str2str` crashed with a real SIGSEGV as soon as any
+  TCP client output stream (`ntrips://` external NTRIP casters, and this
+  add-on's own internal relay) received data, on this add-on's Alpine
+  base image. Root-caused with a real build of this image and a gdb
+  backtrace: RTKLIB's `gentcp()` (`src/stream.c`) resolves the target
+  address with the legacy `gethostbyname()`, which corrupts memory on
+  musl even for a plain numeric IP like `127.0.0.1`. This means **every
+  external NTRIP caster configured in `ntrip_casters` was silently
+  broken** on real Home Assistant installations - found while diagnosing
+  a real crash-loop reported by a user, reproduced locally by building
+  this exact image and replaying real captured RTCM3/NMEA data through
+  it. Fixed at the source with `patches/0001-rtklib-gentcp-getaddrinfo.patch`,
+  applied to RTKLIB during the Docker build: replaces `gethostbyname()`
+  with `getaddrinfo()`, the modern POSIX-standard, thread-safe
+  replacement, unaffected on both glibc and musl - verified by
+  rebuilding the image and confirming the crash no longer reproduces,
+  for both the external-caster and internal-relay cases.
+- The internal relay (used by the local NTRIP caster and, when
+  `rtcm_port == nmea_port`, by NMEA monitoring/survey-in) now has
+  `str2str` act as the TCP server (`tcpsvr://`) instead of the client
+  (`tcpcli://`), with `caster.py` connecting to it instead of the other
+  way around: `gentcp()`'s server-role code path never calls
+  `gethostbyname()`, so this was already immune to the bug above even
+  before the RTKLIB patch - kept as defense in depth. Fixed a related bug
+  introduced by this change: an abrupt disconnection (e.g. a `str2str`
+  restart) raised `ConnectionResetError` from `recv()`, which wasn't
+  caught, silently killing the relay's reconnect loop.
+
 ## 0.2.14
 
 - Diagnostics: `watchdog_str2str()` now logs `str2str`'s exit code when
