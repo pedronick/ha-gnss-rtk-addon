@@ -48,13 +48,15 @@ def test_fetch_precise_products_falls_back_from_fin_to_rap(monkeypatch, tmp_path
     monkeypatch.setattr(ppp, "try_download", fake_try_download)
     (tmp_path / "igs20.atx").write_bytes(b"fake atx")  # skip the real ANTEX download
 
-    sp3_paths, clk_paths, atx_path = ppp.fetch_precise_products([dt.date(2024, 1, 15)], tmp_path)
+    sp3_paths, clk_paths, atx_path, tiers_used = ppp.fetch_precise_products(
+        [dt.date(2024, 1, 15)], tmp_path)
 
     assert len(sp3_paths) == 1 and len(clk_paths) == 1
     assert "IGS0OPSRAP" in sp3_paths[0].name
     assert sp3_paths[0].read_bytes() == b"fake product content"
     assert any("IGS0OPSFIN" in c for c in calls), "must try FIN first"
     assert any("IGS0OPSRAP" in c for c in calls), "must fall back to RAP"
+    assert tiers_used == {dt.date(2024, 1, 15): "RAP"}
 
 
 def test_fetch_precise_products_raises_when_no_tier_available(monkeypatch, tmp_path):

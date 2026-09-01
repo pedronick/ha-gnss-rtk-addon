@@ -165,7 +165,11 @@ def build_igs_names(date, product):
 
 def fetch_precise_products(dates, workdir, products=("FIN", "RAP")):
     """Downloads SP3+CLK for each covered date, and the ANTEX file (once,
-    shared cache). Returns (sp3_list, clk_list, atx_path).
+    shared cache). Returns (sp3_list, clk_list, atx_path, tiers_used),
+    where tiers_used is {date: product} recording which tier actually
+    succeeded for each date - used by the PPP campaign to decide whether
+    a later refinement with "final" products is worth attempting (no
+    point if every date already used "FIN").
 
     Tries each product tier in order (final first, then rapid) and uses
     the first one where both SP3 and CLK download successfully. This
@@ -175,7 +179,7 @@ def fetch_precise_products(dates, workdir, products=("FIN", "RAP")):
     (published ~11-18 days later) - rapid products (~17-41h latency) are
     the realistic fallback for a same-day/next-day campaign. Without
     this, the automatic campaign would fail every time by default."""
-    sp3_paths, clk_paths = [], []
+    sp3_paths, clk_paths, tiers_used = [], [], {}
     for date in dates:
         week, _ = gps_week_dow(date)
         sp3_gz = clk_gz = None
@@ -187,6 +191,7 @@ def fetch_precise_products(dates, workdir, products=("FIN", "RAP")):
             clk_urls = [f"{m.format(week=week)}/{clk_name}" for m in SP3_CLK_MIRRORS]
             if try_download(sp3_urls, candidate_sp3) and try_download(clk_urls, candidate_clk):
                 sp3_gz, clk_gz = candidate_sp3, candidate_clk
+                tiers_used[date] = product
                 break
             for stale in (candidate_sp3, candidate_clk):
                 stale.unlink(missing_ok=True)
@@ -200,7 +205,7 @@ def fetch_precise_products(dates, workdir, products=("FIN", "RAP")):
     if not atx_path.exists():
         if not try_download(ANTEX_MIRRORS, atx_path):
             raise RuntimeError("igs20.atx download failed")
-    return sp3_paths, clk_paths, atx_path
+    return sp3_paths, clk_paths, atx_path, tiers_used
 
 
 def run_rnx2rtkp(obs_path, nav_path, sp3_paths, clk_paths, atx_path, workdir):

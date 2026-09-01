@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.18
+
+- Feature: once a PPP campaign completes using "rapid" (RAP) IGS
+  products rather than the more precise "final" (FIN) ones - the normal
+  case, since FIN takes ~11-18 days - the add-on now checks once a day in
+  the background for FIN becoming available, instead of never trying
+  again. This doesn't block a new campaign from being started in the
+  meantime: it's a separate task, tracked by the new
+  `sensor.ppp_refinement_status` (idle / waiting_for_final / available /
+  error), superseded automatically if a new campaign starts. If/when FIN
+  shows up, the refined position is published to the same manual
+  position fields (`number.manual_latitude`/etc.) used everywhere else -
+  not applied to the receiver automatically, consistent with this add-on
+  never changing the base's live position without an explicit
+  `button.apply_manual_position`. The check survives an add-on restart
+  (resumed from the persisted RINEX files on disk), since the whole point
+  is to survive until the next campaign starts, not until the next
+  restart.
+
 ## 0.2.17
 
 - Feature: the PPP campaign no longer fails outright when IGS products

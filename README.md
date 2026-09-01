@@ -20,6 +20,7 @@ supports u-blox ZED-F9P/M8P, and can support others with a new module in
   - `number.ppp_campaign_duration` (hours)
   - `button.start_ppp_campaign` / `button.cancel_ppp_campaign` — PPP-static processing over multi-hour raw logs (centimeter-level)
   - `sensor.ppp_campaign_time_remaining` (seconds, updated every second during the logging phase and during `waiting_for_products`)
+  - `sensor.ppp_refinement_status` — idle / waiting_for_final / available / error (background daily check for more precise "final" IGS products after a campaign completes with "rapid" ones, see below)
   - `number.manual_latitude` / `manual_longitude` / `manual_height`
   - `button.apply_manual_position`
   - `sensor.local_caster_connected_rovers` (only if `caster_enabled: true`)
@@ -351,9 +352,29 @@ In practice this means: for a campaign to complete automatically without
 manual intervention, plan for it to keep the add-on's `raw_log_retention_hours`
 comfortably larger than "campaign duration + expected product latency"
 (the default 72h covers a same-day campaign followed by up to ~41h of
-waiting for rapid products; final products, at 11-18 days, will not be
-reached automatically at default settings — see `ppp_process.py` for
-reprocessing an old log manually once they're out).
+waiting for rapid products).
+
+#### Getting the best possible precision later: `sensor.ppp_refinement_status`
+
+Once the campaign completes with `sensor.ppp_campaign` = `done`, check
+what tier was actually used (see the add-on log: `[ppp] completed: ...
+(tiers used: {...})`). If it was `RAP` rather than `FIN` — the normal
+case for a same-day/next-day campaign, since "final" products take
+~11-18 days — the add-on automatically starts a **separate background
+task** that checks once a day whether `FIN` products have since been
+published for that campaign's date(s). This doesn't block a new
+campaign from being started in the meantime (a new campaign starting
+supersedes and stops it).
+
+If/when `FIN` becomes available, `sensor.ppp_refinement_status` moves to
+`available` and the refined (more precise) coordinates are published to
+the same `number.manual_latitude` / `manual_longitude` / `manual_height`
+fields used everywhere else in this add-on — **not applied to the
+receiver automatically**: reapplying it remains a deliberate action via
+`button.apply_manual_position`, consistent with how this add-on never
+changes the base's live position without explicit user action. Values:
+`idle` (nothing to refine, `FIN` was already used) / `waiting_for_final`
+/ `available` / `error`.
 
 ### Backup of the computed position
 

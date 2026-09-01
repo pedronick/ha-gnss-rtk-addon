@@ -40,6 +40,7 @@ SERIAL_SILENCE_TIMEOUT_S = 15
 MQTT_RETRY_INTERVAL_S = 10
 RELAY_READ_TIMEOUT_S = 1  # socket timeout for _relay_line_reader(), module-level so tests can shorten it
 PPP_PRODUCT_RETRY_INTERVAL_S = 3600  # how often to retry downloading IGS products while waiting_for_products
+PPP_REFINEMENT_CHECK_INTERVAL_S = 86400  # how often to check for FIN products once a RAP-based fix is applied
 
 # str2str status line format (verified with a real binary):
 # "2024/01/15 12:34:56 [CC---]        425 B     699 bps (1) send error (111) "
@@ -93,6 +94,11 @@ class App:
         self.ppp_running = False
         self.survey_cancel_event = None
         self.ppp_cancel_event = None
+        # Bumped each time a new PPP campaign starts: invalidates (and
+        # stops) any run_ppp_refinement() background thread left over
+        # from a previous campaign, since only one refinement should be
+        # active at a time.
+        self.ppp_refinement_id = 0
         self.manual_lat = None
         self.manual_lon = None
         self.manual_height = None
@@ -359,6 +365,9 @@ class App:
         d.publish_discovery(self.mqtt, "sensor", "ppp_remaining", d.sensor_config(
             "ppp_remaining", "PPP campaign: time remaining", f"{BASE}/ppp_remaining/state",
             unit="s", icon="mdi:timer-sand", device_class="duration"))
+        d.publish_discovery(self.mqtt, "sensor", "ppp_refinement_status", d.sensor_config(
+            "ppp_refinement_status", "PPP refinement (final products)",
+            f"{BASE}/ppp_refinement_status/state", icon="mdi:satellite-variant-outline"))
         if self.caster_enabled:
             d.publish_discovery(self.mqtt, "sensor", "caster_clients", d.sensor_config(
                 "caster_clients", "Connected rovers (local caster)",
@@ -622,11 +631,24 @@ class App:
         products aren't published yet for such a recent date - retried
         every PPP_PRODUCT_RETRY_INTERVAL_S, bounded by
         raw_log_retention_hours) -> processing again (rnx2rtkp) -> done.
-        Cancellable at every step, including while waiting."""
+        Cancellable at every step, including while waiting.
+
+        "done" here means a fix was applied - usually from "rapid" (RAP)
+        products, since "final" (FIN, more precise) ones take ~11-18 days
+        and aren't worth blocking on. If RAP was used, this schedules a
+        separate run_ppp_refinement() background task (see its docstring)
+        that checks daily for FIN becoming available and exposes a
+        refined position later without blocking a new campaign from being
+        started in the meantime."""
         if self.ppp_running:
             return
         self.ppp_running = True
         self.ppp_cancel_event = threading.Event()
+        # Supersede (and let stop on its own) any refinement thread still
+        # checking daily for FIN products from a previous campaign - this
+        # new campaign will schedule its own if it also needs one.
+        self.ppp_refinement_id += 1
+        self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
         start_ts = time.time()
         duration_s = self.ppp_duration_hours * 3600
         deadline = start_ts + duration_s
@@ -684,10 +706,10 @@ class App:
         # cleanup_raw_logs() will already have deleted the source raw log by
         # then anyway.
         wait_deadline = end_ts + self.raw_log_retention_hours * 3600
-        sp3_paths = clk_paths = atx_path = None
+        sp3_paths = clk_paths = atx_path = tiers_used = None
         while sp3_paths is None:
             try:
-                sp3_paths, clk_paths, atx_path = ppp.fetch_precise_products(dates, workdir)
+                sp3_paths, clk_paths, atx_path, tiers_used = ppp.fetch_precise_products(dates, workdir)
             except Exception as e:
                 if self.ppp_cancel_event.is_set():
                     print("[ppp] campaign cancelled by the user while waiting for IGS products", flush=True)
@@ -727,9 +749,9 @@ class App:
             self.ppp_running = False
             return
 
-        shutil.rmtree(workdir, ignore_errors=True)
         self.driver.set_fixed_base(self.rtcm_port, self.baud, lat, lon, height)
-        print(f"[ppp] completed: {lat:.8f}, {lon:.8f}, {height:.3f}", flush=True)
+        print(f"[ppp] completed: {lat:.8f}, {lon:.8f}, {height:.3f} "
+              f"(tiers used: {tiers_used})", flush=True)
         self.save_position_backup(lat, lon, height, "ppp",
                                    duration_hours=self.ppp_duration_hours, num_raw_files=len(raw_files))
         self.mqtt.publish(f"{BASE}/ppp_status/state", "done", retain=True)
@@ -739,6 +761,120 @@ class App:
         self.mqtt.publish(f"{BASE}/manual_height/state", f"{height:.3f}", retain=True)
         self.manual_lat, self.manual_lon, self.manual_height = lat, lon, height
         self.ppp_running = False
+
+        if all(tier == "FIN" for tier in tiers_used.values()):
+            # Already the best available tier - nothing to refine later.
+            shutil.rmtree(workdir, ignore_errors=True)
+            self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
+            return
+
+        # A less precise tier (RAP) was used for at least one date: "final"
+        # products (more precise) may still show up later, published
+        # ~11-18 days after the observation date. Move the workdir to a
+        # stable location (this campaign's own workdir is about to be
+        # reusable by the next campaign) and check for them once a day in
+        # the background - checking as often as the main retry loop above
+        # would be pointless at that latency. Superseded if a new campaign
+        # starts before this finishes (self.ppp_refinement_id changes).
+        refinement_workdir = Path(RAW_LOG_DIR).parent / "ppp_refinement_workdir"
+        shutil.rmtree(refinement_workdir, ignore_errors=True)
+        workdir.rename(refinement_workdir)
+        obs_path = refinement_workdir / Path(obs_path).name
+        nav_path = refinement_workdir / Path(nav_path).name
+        refinement_id = self.ppp_refinement_id
+        threading.Thread(
+            target=self.run_ppp_refinement,
+            args=(refinement_id, dates, obs_path, nav_path, refinement_workdir),
+            daemon=True,
+        ).start()
+
+    def run_ppp_refinement(self, refinement_id, dates, obs_path, nav_path, workdir):
+        """Runs after a campaign completes using a less precise IGS
+        product tier (RAP) than the best available (FIN). Checks once a
+        day whether "final" products have been published yet for the
+        campaign's date(s) - checking as often as the main campaign's
+        retry loop would be pointless at FIN's ~11-18 day latency. If/when
+        they show up, computes the refined position and exposes it via
+        the same manual position fields used everywhere else in this
+        add-on - population only, consistent with how this add-on never
+        changes the base's live position without an explicit user action
+        (button.apply_manual_position remains required to actually send
+        it to the receiver).
+
+        Superseded by a new campaign starting in the meantime
+        (self.ppp_refinement_id no longer matches refinement_id, checked
+        at the top of every wait cycle) - stops and cleans up instead of
+        racing the new campaign for the same workdir name."""
+        self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "waiting_for_final", retain=True)
+        print(f"[ppp] refinement: checking daily for FIN products for {[str(d) for d in dates]}", flush=True)
+        while self.ppp_refinement_id == refinement_id:
+            waited = 0
+            superseded = False
+            while waited < PPP_REFINEMENT_CHECK_INTERVAL_S:
+                if self.ppp_refinement_id != refinement_id:
+                    superseded = True
+                    break
+                step = min(1, PPP_REFINEMENT_CHECK_INTERVAL_S - waited)
+                time.sleep(step)
+                waited += step
+            if superseded:
+                break
+            try:
+                sp3_paths, clk_paths, atx_path, _ = ppp.fetch_precise_products(
+                    dates, workdir, products=("FIN",))
+            except Exception as e:
+                print(f"[ppp] refinement: FIN products not available yet ({e}), "
+                      f"retrying in {PPP_REFINEMENT_CHECK_INTERVAL_S}s", flush=True)
+                continue
+            if self.ppp_refinement_id != refinement_id:
+                break
+            try:
+                pos_path = ppp.run_rnx2rtkp(obs_path, nav_path, sp3_paths, clk_paths, atx_path, workdir)
+                lat, lon, height = ppp.parse_last_position(pos_path)
+            except Exception as e:
+                print(f"[ppp] refinement error: {e}", flush=True)
+                self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "error", retain=True)
+                shutil.rmtree(workdir, ignore_errors=True)
+                return
+            print(f"[ppp] refinement: FIN-based position available: {lat:.8f}, {lon:.8f}, "
+                  f"{height:.3f} (not applied automatically)", flush=True)
+            self.manual_lat, self.manual_lon, self.manual_height = lat, lon, height
+            self.mqtt.publish(f"{BASE}/manual_lat/state", f"{lat:.8f}", retain=True)
+            self.mqtt.publish(f"{BASE}/manual_lon/state", f"{lon:.8f}", retain=True)
+            self.mqtt.publish(f"{BASE}/manual_height/state", f"{height:.3f}", retain=True)
+            self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "available", retain=True)
+            shutil.rmtree(workdir, ignore_errors=True)
+            return
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    def _resume_ppp_refinement_if_any(self):
+        """Called once at add-on startup. Unlike ppp_campaign_workdir
+        (always wiped, see run()), ppp_refinement_workdir is deliberately
+        NOT deleted on restart: it can be waiting for FIN products for up
+        to ~18 days, almost certainly spanning at least one add-on/Home
+        Assistant restart in practice, and the whole point of that wait is
+        to survive until the next campaign starts - not until the next
+        restart. Resumes checking from the persisted RINEX files if
+        present; discards the directory only if it's missing what's
+        needed to resume (e.g. an older add-on version's leftovers)."""
+        workdir = Path(RAW_LOG_DIR).parent / "ppp_refinement_workdir"
+        obs_path, nav_path = workdir / "campaign.obs", workdir / "campaign.nav"
+        if not (obs_path.exists() and nav_path.exists()):
+            shutil.rmtree(workdir, ignore_errors=True)
+            return
+        try:
+            dates = ppp.parse_obs_dates(str(obs_path))
+        except Exception as e:
+            print(f"[ppp] discarding unresumable refinement workdir ({e})", flush=True)
+            shutil.rmtree(workdir, ignore_errors=True)
+            return
+        self.ppp_refinement_id += 1
+        print(f"[ppp] resuming refinement check for {[str(d) for d in dates]} after restart", flush=True)
+        threading.Thread(
+            target=self.run_ppp_refinement,
+            args=(self.ppp_refinement_id, dates, obs_path, nav_path, workdir),
+            daemon=True,
+        ).start()
 
     def apply_manual_position(self):
         if None in (self.manual_lat, self.manual_lon, self.manual_height):
@@ -864,6 +1000,7 @@ class App:
                       f"Retrying in {MQTT_RETRY_INTERVAL_S}s...", flush=True)
                 time.sleep(MQTT_RETRY_INTERVAL_S)
         self.mqtt.loop_start()
+        self._resume_ppp_refinement_if_any()
 
         self.configure_receiver()
         try:

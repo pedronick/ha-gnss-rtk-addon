@@ -45,6 +45,7 @@ def _bare_app(**overrides):
         ppp_running=False,
         survey_cancel_event=None,
         ppp_cancel_event=None,
+        ppp_refinement_id=0,
         broadcaster=caster.Broadcaster(),
         _last_fix_publish=0,
     )
@@ -500,7 +501,10 @@ def test_run_ppp_campaign_waits_for_products_then_completes(monkeypatch, tmp_pat
         attempts.append(1)
         if len(attempts) < 3:
             raise RuntimeError("not published yet")
-        return (["sp3"], ["clk"], "atx")
+        # FIN (the best tier) succeeding here means no background
+        # refinement gets scheduled - kept out of scope for this test,
+        # see test_run_ppp_campaign_schedules_refinement_after_rap_fix.
+        return (["sp3"], ["clk"], "atx", {dt.date(2024, 1, 15): "FIN"})
 
     _mock_ppp_pipeline_up_to_products(monkeypatch, fake_fetch)
 
@@ -514,6 +518,8 @@ def test_run_ppp_campaign_waits_for_products_then_completes(monkeypatch, tmp_pat
     assert "waiting_for_products" in states
     assert states[-1] == "done"
     assert app.manual_lat == 45.0
+    refinement_states = [p for k, p in app.mqtt.published if k.endswith("ppp_refinement_status/state")]
+    assert refinement_states[-1] == "idle"
 
 
 def test_run_ppp_campaign_can_be_cancelled_while_waiting_for_products(monkeypatch, tmp_path):
@@ -545,6 +551,121 @@ def test_run_ppp_campaign_can_be_cancelled_while_waiting_for_products(monkeypatc
     assert not app.ppp_running
     states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
     assert states[-1] == "cancelled"
+
+
+def test_run_ppp_campaign_schedules_refinement_after_rap_fix(monkeypatch, tmp_path):
+    """When the initial fix uses RAP (not the best available tier), the
+    campaign must still complete ("done", applied to the receiver) rather
+    than blocking on FIN for up to ~18 days - a separate background task
+    then checks for FIN and, once found, exposes the refined position via
+    the manual position fields WITHOUT reapplying it automatically (that
+    remains a deliberate action, like every other manual position in this
+    add-on)."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "PPP_REFINEMENT_CHECK_INTERVAL_S", 0.2)
+    monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
+
+    def fake_fetch(dates, workdir, products=("FIN", "RAP")):
+        if products == ("FIN",):
+            return (["sp3f"], ["clkf"], "atxf", {dt.date(2024, 1, 15): "FIN"})
+        return (["sp3"], ["clk"], "atx", {dt.date(2024, 1, 15): "RAP"})
+
+    _mock_ppp_pipeline_up_to_products(monkeypatch, fake_fetch)
+    # Overrides _mock_ppp_pipeline_up_to_products' own fixed-position stub:
+    # must come after it to win, since this test needs two distinct
+    # positions (RAP fix, then refined FIN fix) instead of one repeated.
+    positions = iter([(45.0, 9.0, 100.0), (45.001, 9.001, 100.5)])
+    monkeypatch.setattr(ppp, "parse_last_position", lambda *a, **k: next(positions))
+
+    set_fixed_base_calls = []
+    app = _bare_app(ppp_duration_hours=1 / 3600, raw_log_retention_hours=72)
+    monkeypatch.setattr(app.driver, "set_fixed_base", lambda *a, **k: set_fixed_base_calls.append(a))
+
+    app.run_ppp_campaign()
+
+    assert len(set_fixed_base_calls) == 1  # the RAP-based fix was applied once
+    assert app.manual_lat == 45.0
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert states[-1] == "done"
+
+    for _ in range(50):
+        refinement_states = [p for k, p in app.mqtt.published if k.endswith("ppp_refinement_status/state")]
+        if refinement_states and refinement_states[-1] == "available":
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("refinement never completed")
+
+    assert app.manual_lat == 45.001, "the refined (FIN) position should replace the manual position fields"
+    assert len(set_fixed_base_calls) == 1, "the refined position must NOT be applied automatically"
+
+
+def test_ppp_refinement_stops_when_superseded_by_new_campaign(monkeypatch, tmp_path):
+    """A new campaign starting bumps app.ppp_refinement_id, which must
+    make any still-running run_ppp_refinement() from a previous campaign
+    stop and clean up on its own instead of racing the new campaign for
+    the same workdir."""
+    monkeypatch.setattr(main, "PPP_REFINEMENT_CHECK_INTERVAL_S", 100)
+    app = _bare_app(raw_log_retention_hours=72)
+    app.ppp_refinement_id = 1
+
+    workdir = tmp_path / "refinement_workdir"
+    workdir.mkdir()
+
+    t = threading.Thread(
+        target=app.run_ppp_refinement,
+        args=(1, [dt.date(2024, 1, 15)], workdir / "campaign.obs", workdir / "campaign.nav", workdir),
+        daemon=True,
+    )
+    t.start()
+    time.sleep(0.3)
+    assert t.is_alive(), "must still be waiting for the next daily check"
+
+    app.ppp_refinement_id = 2  # a new campaign started
+    t.join(timeout=5)
+
+    assert not t.is_alive()
+    assert not workdir.exists(), "must clean up its workdir once superseded"
+
+
+def test_resume_ppp_refinement_if_any_restarts_from_persisted_files(monkeypatch, tmp_path):
+    """ppp_refinement_workdir is deliberately not wiped on add-on restart
+    (unlike ppp_campaign_workdir) since the whole point of the daily FIN
+    check is to survive until the next campaign starts, not until the
+    next restart - this is what makes it actually resume."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    workdir = tmp_path / "ppp_refinement_workdir"
+    workdir.mkdir()
+    (workdir / "campaign.obs").write_text(
+        "     3.04           OBSERVATION DATA    M: Mixed            RINEX VERSION / TYPE\n"
+        "  2024    01    15    00    00   00.0000000     GPS         TIME OF FIRST OBS   \n"
+        "                                                            END OF HEADER       \n"
+    )
+    (workdir / "campaign.nav").write_text("dummy nav content\n")
+
+    app = _bare_app(ppp_refinement_id=0)
+    started = []
+    monkeypatch.setattr(app, "run_ppp_refinement", lambda *a, **k: started.append(a))
+
+    app._resume_ppp_refinement_if_any()
+    time.sleep(0.1)
+
+    assert app.ppp_refinement_id == 1
+    assert len(started) == 1
+    assert started[0][0] == 1  # refinement_id passed to the thread matches
+    assert workdir.exists(), "must not delete the workdir it's about to resume"
+
+
+def test_resume_ppp_refinement_if_any_discards_incomplete_workdir(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    workdir = tmp_path / "ppp_refinement_workdir"
+    workdir.mkdir()  # no campaign.obs/campaign.nav inside: nothing to resume from
+
+    app = _bare_app(ppp_refinement_id=0)
+    app._resume_ppp_refinement_if_any()
+
+    assert app.ppp_refinement_id == 0, "nothing should have been resumed"
+    assert not workdir.exists()
 
 
 def test_run_ppp_campaign_errors_once_retention_window_closes(monkeypatch, tmp_path):
