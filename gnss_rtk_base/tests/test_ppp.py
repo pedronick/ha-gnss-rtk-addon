@@ -137,9 +137,10 @@ def test_try_download_uses_first_working_mirror(monkeypatch, tmp_path):
     calls = []
 
     class FakeResponse:
-        def __init__(self, status_code, content):
+        def __init__(self, status_code, content, headers=None):
             self.status_code = status_code
             self.content = content
+            self.headers = headers or {}
 
     def fake_get(url, timeout):
         calls.append(url)
@@ -157,10 +158,42 @@ def test_try_download_uses_first_working_mirror(monkeypatch, tmp_path):
     assert calls == ["https://broken-mirror/x", "https://good-mirror/x"]
 
 
+def test_try_download_rejects_html_error_page_with_200_status(monkeypatch, tmp_path):
+    """Regression: a mirror requiring authentication (e.g. CDDIS without
+    NASA Earthdata credentials) can serve an HTML login/error page with a
+    200 status, long enough to pass a bare length check - this made a
+    real PPP campaign fail deep inside gzip decompression with a
+    confusing "Not a gzipped file (b'<!')" instead of a clear "download
+    failed"."""
+    class FakeResponse:
+        def __init__(self, status_code, content, headers=None):
+            self.status_code = status_code
+            self.content = content
+            self.headers = headers or {}
+
+    html_page = b"<!DOCTYPE html><html><body>Please log in</body></html>" + b" " * 1000
+
+    def fake_get(url, timeout):
+        if "html-content-type" in url:
+            return FakeResponse(200, b"x" * 2000, headers={"Content-Type": "text/html; charset=utf-8"})
+        return FakeResponse(200, html_page)
+
+    monkeypatch.setattr(ppp.requests, "get", fake_get)
+
+    dest = tmp_path / "product.gz"
+    assert ppp.try_download(["https://auth-required-mirror/x"], dest) is False
+    assert not dest.exists()
+
+    dest2 = tmp_path / "product2.gz"
+    assert ppp.try_download(["https://html-content-type/x"], dest2) is False
+    assert not dest2.exists()
+
+
 def test_try_download_returns_false_if_all_mirrors_fail(monkeypatch, tmp_path):
     class FakeResponse:
         status_code = 404
         content = b""
+        headers = {}
 
     monkeypatch.setattr(ppp.requests, "get", lambda url, timeout: FakeResponse())
 

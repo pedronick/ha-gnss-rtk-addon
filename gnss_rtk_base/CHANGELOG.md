@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.16
+
+- Fix (PPP campaign): `try_download()` accepted any HTTP 200 response
+  over 1000 bytes as a successful download, without checking it was
+  actually the expected file. A mirror requiring authentication (e.g.
+  CDDIS without NASA Earthdata credentials) can serve an HTML
+  login/error page with a 200 status, long enough to pass that check -
+  found from a real PPP campaign run on a user's Home Assistant
+  instance, which failed deep inside gzip decompression with a
+  confusing `Not a gzipped file (b'<!')` instead of a clear "download
+  failed". Now rejects responses that look like HTML (leading `<` or an
+  `html` Content-Type) before accepting them, so a real failure now
+  reports plainly ("No IGS products available for <date> (tried: FIN,
+  RAP)") instead of a cryptic downstream error. Verified against the
+  real network: a very recent date now fails cleanly (as expected: even
+  "rapid" IGS products aren't published yet for it), and an older date
+  still downloads correctly.
+
 ## 0.2.15
 
 - **Critical fix**: `str2str` crashed with a real SIGSEGV as soon as any

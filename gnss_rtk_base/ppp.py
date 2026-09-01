@@ -121,10 +121,22 @@ def parse_obs_dates(obs_path):
 
 
 def try_download(urls, dest):
+    """Downloads the first URL that actually returns the real file.
+
+    A 200 status with a long enough body isn't proof of success: a mirror
+    requiring authentication (e.g. CDDIS without NASA Earthdata
+    credentials) can serve an HTML login/error page with a 200 status,
+    long enough to pass a bare length check - found in production, where
+    this made a PPP campaign fail deep inside gzip decompression with a
+    confusing "Not a gzipped file (b'<!')" instead of a clear "download
+    failed" error. Rejects anything that looks like HTML instead of the
+    expected binary/text product file."""
     for url in urls:
         try:
             r = requests.get(url, timeout=60)
-            if r.status_code == 200 and len(r.content) > 1000:
+            looks_like_html = (r.content.lstrip()[:1] == b"<"
+                                or "html" in r.headers.get("Content-Type", "").lower())
+            if r.status_code == 200 and len(r.content) > 1000 and not looks_like_html:
                 dest.write_bytes(r.content)
                 return True
         except requests.RequestException:
