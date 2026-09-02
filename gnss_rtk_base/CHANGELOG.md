@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.23
+
+- Changed `reprocess_existing_logs()` to use the **oldest**
+  `ppp_campaign_duration` hours of the raw log buffer, instead of the
+  whole `raw_log_retention_hours` window up to "now". Using "now" meant
+  it always included the freshest data, which is exactly as unlikely to
+  already have IGS products available as a normal campaign's own
+  freshly-logged data - defeating the point of reusing already-logged
+  data at all, found while discussing why a first reprocess attempt was
+  still stuck waiting on very recent data. Older buffered data has had
+  more real time pass and may already have "rapid" products ready
+  (~17-41h latency), sometimes needing no wait at all.
+- New `sensor.raw_log_buffer_hours` shows how many hours of raw log are
+  currently retained, so it's clear upfront how far back
+  `reprocess_existing_logs` can reach.
+- New `button.clear_raw_log_buffer`: deletes the buffered raw log for
+  when the receiver has been physically moved, since the old buffered
+  observations describe the *previous* location and
+  `reprocess_existing_logs` would otherwise silently compute a fix for
+  it. A no-op while a PPP operation is running; also supersedes/discards
+  any pending refinement or computation-retry state.
+
 ## 0.2.22
 
 - Feature: the exact raw log files behind a successfully applied PPP

@@ -757,20 +757,30 @@ def test_run_ppp_campaign_clears_stale_retry_state_from_previous_attempt(monkeyp
     t.join(timeout=5)
 
 
-def test_reprocess_existing_logs_uses_retained_raw_files_without_relogging(monkeypatch, tmp_path):
-    """The whole point: reprocesses whatever raw log files are still on
-    disk (governed by raw_log_retention_hours) without ever going through
-    a "logging" phase - found worth adding after a real campaign's
-    intermediate files were lost (before retry_ppp_computation existed),
-    even though the underlying raw logs were still within retention."""
-    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+def test_reprocess_existing_logs_uses_oldest_buffered_data_without_relogging(monkeypatch, tmp_path):
+    """The whole point: reprocesses the OLDEST ppp_duration_hours of raw
+    log still on disk, without ever going through a "logging" phase -
+    older data is more likely to already have IGS products available
+    (more real time has passed since it was observed) than "now", which
+    is exactly as fresh, and exactly as bad a starting point for product
+    availability, as a normal campaign's own freshly-logged data."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
     monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
+
+    now = time.time()
+    oldest_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    oldest_file.write_bytes(b"old data")
+    os.utime(oldest_file, (now - 40 * 3600, now - 40 * 3600))  # 40h old: within a 72h buffer
+    newest_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011623.rtcm3"
+    newest_file.write_bytes(b"new data")
+    os.utime(newest_file, (now - 1, now - 1))  # essentially "now"
 
     collected_windows = []
 
     def fake_collect(raw_log_dir, start_ts, end_ts):
         collected_windows.append((start_ts, end_ts))
-        return ["fake1.rtcm3", "fake2.rtcm3"]
+        return [str(oldest_file)]
 
     def fake_fetch(dates, workdir, products=("FIN", "RAP")):
         return (["sp3"], ["clk"], "atx", {dt.date(2024, 1, 15): "FIN"})
@@ -783,19 +793,63 @@ def test_reprocess_existing_logs_uses_retained_raw_files_without_relogging(monke
     monkeypatch.setattr(ppp, "run_rnx2rtkp", lambda *a, **k: "pos")
     monkeypatch.setattr(ppp, "parse_last_position", lambda *a, **k: (45.0, 9.0, 100.0))
 
-    app = _bare_app(raw_log_retention_hours=72)
+    app = _bare_app(raw_log_retention_hours=72, ppp_duration_hours=6)
     monkeypatch.setattr(app.driver, "set_fixed_base", lambda *a, **k: None)
 
     app.reprocess_existing_logs()
 
     assert len(collected_windows) == 1
     start_ts, end_ts = collected_windows[0]
-    assert (end_ts - start_ts) / 3600 == pytest.approx(72, rel=0.01), \
-        "window must span raw_log_retention_hours, i.e. everything still retained"
+    assert start_ts == pytest.approx(now - 40 * 3600, abs=2), \
+        "must start from the oldest file's timestamp, not from raw_log_retention_hours ago"
+    assert (end_ts - start_ts) / 3600 == pytest.approx(6, rel=0.01), \
+        "window must span ppp_duration_hours, not the whole buffer"
     states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
     assert "logging" not in states, "must not go through a logging phase"
     assert states[-1] == "done"
     assert app.manual_lat == 45.0
+
+
+def test_reprocess_existing_logs_errors_when_buffer_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))  # doesn't exist: empty buffer
+    app = _bare_app(raw_log_retention_hours=72, ppp_duration_hours=6)
+
+    app.reprocess_existing_logs()
+
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert states[-1] == "error"
+    assert not app.ppp_running
+
+
+def test_clear_raw_log_buffer_removes_files_and_resets_buffer_hours(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    raw1.write_bytes(b"data")
+
+    app = _bare_app(raw_log_retention_hours=72)
+    app.ppp_retry_state = {"stale": True}
+    app.ppp_refinement_id = 1
+
+    app.clear_raw_log_buffer()
+
+    assert not raw1.exists()
+    assert app.ppp_retry_state is None
+    assert app.ppp_refinement_id == 2, "must supersede any pending refinement too"
+    buffer_states = [p for k, p in app.mqtt.published if k.endswith("raw_log_buffer_hours/state")]
+    assert buffer_states[-1] == 0
+
+
+def test_clear_raw_log_buffer_is_noop_while_a_ppp_operation_is_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    raw1.write_bytes(b"data")
+
+    app = _bare_app(ppp_running=True)
+    app.clear_raw_log_buffer()
+
+    assert raw1.exists(), "must not delete data out from under an in-progress PPP operation"
 
 
 def test_reprocess_existing_logs_is_noop_while_a_campaign_is_running():
@@ -805,8 +859,7 @@ def test_reprocess_existing_logs_is_noop_while_a_campaign_is_running():
 
 
 def test_reprocess_existing_logs_supersedes_pending_retry_state(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
-    monkeypatch.setattr(ppp, "collect_raw_files", lambda *a, **k: [])  # no files -> quick error exit
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))  # doesn't exist: empty buffer -> quick error exit
 
     app = _bare_app(raw_log_retention_hours=72)
     app.ppp_retry_state = {"stale": True}

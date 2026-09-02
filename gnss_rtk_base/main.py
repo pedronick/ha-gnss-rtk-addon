@@ -325,7 +325,55 @@ class App:
                         os.remove(path)
                 except OSError:
                     pass
+            self._publish_raw_log_buffer_hours()
             time.sleep(3600)
+
+    def _oldest_raw_log_ts(self):
+        """mtime of the oldest currently-retained raw log file, or None if
+        the buffer is empty (e.g. right after startup, or after
+        clear_raw_log_buffer())."""
+        timestamps = []
+        for path in glob.glob(f"{RAW_LOG_DIR}/gnssbase_*.rtcm3"):
+            try:
+                timestamps.append(os.path.getmtime(path))
+            except OSError:
+                pass
+        return min(timestamps) if timestamps else None
+
+    def _publish_raw_log_buffer_hours(self):
+        """How many hours of continuous raw log are currently available to
+        reprocess_existing_logs() - lets the user judge, before pressing
+        it, roughly how far back it can reach (bounded by
+        raw_log_retention_hours) without needing to wait for new data."""
+        oldest = self._oldest_raw_log_ts()
+        hours = round((time.time() - oldest) / 3600, 1) if oldest is not None else 0
+        self.mqtt.publish(f"{BASE}/raw_log_buffer_hours/state", hours, retain=True)
+
+    def clear_raw_log_buffer(self):
+        """Deletes all continuous raw log files (RAW_LOG_DIR) - e.g. after
+        physically moving the antenna, when the old buffered observations
+        no longer describe the receiver's current position and would
+        otherwise silently produce a wrong fix if reused by
+        reprocess_existing_logs(). A no-op while a PPP operation is
+        running, to avoid deleting data out from under it mid-flight.
+        Also supersedes any pending refinement/computation-retry state,
+        since both would otherwise still be able to apply/refine a
+        position derived from the now-discarded old data."""
+        if self.ppp_running:
+            return
+        removed = 0
+        for path in glob.glob(f"{RAW_LOG_DIR}/gnssbase_*.rtcm3"):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+        print(f"[main] raw log buffer cleared: removed {removed} file(s)", flush=True)
+        self.ppp_retry_state = None
+        self.ppp_refinement_id += 1
+        self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
+        shutil.rmtree(Path(RAW_LOG_DIR).parent / "ppp_refinement_workdir", ignore_errors=True)
+        self._publish_raw_log_buffer_hours()
 
     # ------------------------------------------------------------ discovery
 
@@ -379,6 +427,12 @@ class App:
         d.publish_discovery(self.mqtt, "button", "ppp_reprocess", d.button_config(
             "ppp_reprocess", "Reprocess existing raw logs (no new logging)",
             f"{BASE}/ppp_reprocess/set", icon="mdi:database-refresh"))
+        d.publish_discovery(self.mqtt, "sensor", "raw_log_buffer_hours", d.sensor_config(
+            "raw_log_buffer_hours", "Raw log buffer depth", f"{BASE}/raw_log_buffer_hours/state",
+            unit="h", icon="mdi:database-clock"))
+        d.publish_discovery(self.mqtt, "button", "clear_raw_log_buffer", d.button_config(
+            "clear_raw_log_buffer", "Clear raw log buffer (e.g. after moving the antenna)",
+            f"{BASE}/clear_raw_log_buffer/set", icon="mdi:database-remove"))
         if self.caster_enabled:
             d.publish_discovery(self.mqtt, "sensor", "caster_clients", d.sensor_config(
                 "caster_clients", "Connected rovers (local caster)",
@@ -413,13 +467,14 @@ class App:
         for topic in ("survey_in/set", "survey_in_cancel/set", "manual_lat/set", "manual_lon/set",
                       "manual_height/set", "apply_manual_position/set",
                       "ppp_duration_hours/set", "ppp_start/set", "ppp_cancel/set",
-                      "ppp_retry_computation/set", "ppp_reprocess/set"):
+                      "ppp_retry_computation/set", "ppp_reprocess/set", "clear_raw_log_buffer/set"):
             client.subscribe(f"{BASE}/{topic}")
         client.publish(f"{BASE}/survey_in/state", "idle", retain=True)
         client.publish(f"{BASE}/survey_in_remaining/state", 0, retain=True)
         client.publish(f"{BASE}/ppp_status/state", "idle", retain=True)
         client.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
         client.publish(f"{BASE}/ppp_duration_hours/state", self.ppp_duration_hours, retain=True)
+        self._publish_raw_log_buffer_hours()
         self.restore_position_backup()
 
     def restore_position_backup(self):
@@ -470,6 +525,8 @@ class App:
             threading.Thread(target=self.retry_ppp_computation, daemon=True).start()
         elif msg.topic.endswith("ppp_reprocess/set"):
             threading.Thread(target=self.reprocess_existing_logs, daemon=True).start()
+        elif msg.topic.endswith("clear_raw_log_buffer/set"):
+            self.clear_raw_log_buffer()
 
     def cancel_survey_in(self):
         if self.survey_running and self.survey_cancel_event:
@@ -716,16 +773,29 @@ class App:
                                       workdir, raw_files, tiers_used, self.ppp_duration_hours)
 
     def reprocess_existing_logs(self):
-        """Reprocesses whatever raw log files are still on disk (governed
-        by raw_log_retention_hours) as a PPP-static campaign, without a
-        new logging phase. Recovers a campaign whose intermediate files
-        were already lost - the whole point of retry_ppp_computation is
-        to avoid ever needing this again for a *computation* failure, but
-        it doesn't help if the files were lost some other way (e.g. an
-        add-on version before 0.2.20, or the retention window rotating
-        out a raw file while waiting for IGS products). Found worth
-        adding after a real campaign's intermediate files were lost this
-        way before retry_ppp_computation existed.
+        """Reprocesses the oldest ppp_duration_hours worth of raw log
+        still on disk as a PPP-static campaign, without a new logging
+        phase. Deliberately uses the *oldest* available data (not
+        "now - ppp_duration_hours to now"): since raw logging is always
+        active regardless of any campaign, the newest data is exactly as
+        fresh as a normal campaign's, which is the worst case for IGS
+        product availability, while older data has already had more real
+        time pass and is more likely to already have products ready -
+        possibly not needing to wait at all. Requested after realizing
+        that always operating on the freshest data (as a normal campaign,
+        and as this method's own first version, which grabbed the whole
+        raw_log_retention_hours window up to "now") defeats the purpose
+        of reprocessing already-logged data at all. Use
+        clear_raw_log_buffer() first if the receiver has since been
+        physically moved: the buffered observations would otherwise
+        silently produce a fix for the *old* location.
+
+        Recovers a campaign whose intermediate files were already lost -
+        the whole point of retry_ppp_computation is to avoid ever needing
+        this again for a *computation* failure, but it doesn't help if
+        the files were lost some other way (e.g. an add-on version before
+        0.2.20). Found worth adding after a real campaign's intermediate
+        files were lost this way before retry_ppp_computation existed.
 
         Shares ppp_running/ppp_cancel_event/ppp_retry_state with
         run_ppp_campaign: only one PPP operation (campaign, reprocess, or
@@ -740,13 +810,21 @@ class App:
         self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
         self.ppp_retry_state = None
         self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
-        print("[ppp] reprocessing existing raw logs (no new logging phase)", flush=True)
+
+        start_ts = self._oldest_raw_log_ts()
+        if start_ts is None:
+            print("[ppp] error: no raw log data available to reprocess "
+                  "(buffer empty - just started, or clear_raw_log_buffer() was used)", flush=True)
+            self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
+            self.ppp_running = False
+            return
+        end_ts = min(start_ts + self.ppp_duration_hours * 3600, time.time())
+        print(f"[ppp] reprocessing the oldest {self.ppp_duration_hours}h of already-logged data "
+              "(no new logging phase)", flush=True)
 
         workdir = self._fresh_ppp_workdir()
-        now = time.time()
-        start_ts = now - self.raw_log_retention_hours * 3600
         try:
-            obs_path, nav_path, dates, raw_files = self._convert_raw_window_to_rinex(start_ts, now, workdir)
+            obs_path, nav_path, dates, raw_files = self._convert_raw_window_to_rinex(start_ts, end_ts, workdir)
         except Exception as e:
             print("[ppp] error:", e, flush=True)
             self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
@@ -754,7 +832,12 @@ class App:
             self.ppp_running = False
             return
 
-        wait_deadline = now + self.raw_log_retention_hours * 3600
+        # Bounded by when the *oldest* file in this window would be
+        # rotated out by cleanup_raw_logs() (raw_log_retention_hours after
+        # its own mtime) - not "now + retention", which would ignore how
+        # much of that window has already elapsed for this (deliberately
+        # older) data.
+        wait_deadline = start_ts + self.raw_log_retention_hours * 3600
         result = self._wait_for_products(dates, workdir, wait_deadline)
         if result is None:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -762,10 +845,8 @@ class App:
             return
         sp3_paths, clk_paths, atx_path, tiers_used = result
 
-        # len(raw_files) approximates the covered duration in hours (files
-        # rotate hourly) - only used for the position backup's metadata.
         self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
-                                      workdir, raw_files, tiers_used, len(raw_files))
+                                      workdir, raw_files, tiers_used, (end_ts - start_ts) / 3600)
 
     def _fresh_ppp_workdir(self):
         """Derived from RAW_LOG_DIR (not hardcoded "/data") so that
