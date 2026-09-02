@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.24
+
+- Unified `button.reprocess_existing_logs` into `button.start_ppp_campaign`
+  and removed the former as a separate entity. `run_ppp_campaign()` now
+  always targets the *oldest* `ppp_campaign_duration` hours of the raw
+  log buffer: if the buffer already holds that much, it skips straight
+  to processing with no logging phase (exactly what
+  `reprocess_existing_logs` used to do); if it holds only part of it,
+  the buffered data counts as a head start and only the *missing*
+  portion is actually logged/waited for, instead of the full duration
+  from scratch; with an empty buffer it behaves like a plain fresh
+  campaign. Requested after realizing that, once a campaign always
+  prefers already-buffered data by construction, a separate button whose
+  only difference was "wait or not" no longer served a purpose - one
+  smart button replaces both, keeping the live countdown UX for whatever
+  portion (if any) still needs to be logged.
+
 ## 0.2.23
 
 - Changed `reprocess_existing_logs()` to use the **oldest**

@@ -18,12 +18,11 @@ supports u-blox ZED-F9P/M8P, and can support others with a new module in
   - `sensor.survey_in_time_remaining` (seconds, updated every second while running)
   - `sensor.ppp_campaign` — idle / logging / processing / **waiting_for_products** / done / error / **cancelled**
   - `number.ppp_campaign_duration` (hours)
-  - `button.start_ppp_campaign` / `button.cancel_ppp_campaign` — PPP-static processing over multi-hour raw logs (centimeter-level)
-  - `sensor.ppp_campaign_time_remaining` (seconds, updated every second during the logging phase and during `waiting_for_products`)
+  - `button.start_ppp_campaign` / `button.cancel_ppp_campaign` — PPP-static processing over multi-hour raw logs (centimeter-level); automatically reuses already-buffered data and only waits for whatever portion is still missing, if any (see below)
+  - `sensor.ppp_campaign_time_remaining` (seconds, updated every second while still waiting for enough buffered/new data, and during `waiting_for_products`)
   - `sensor.ppp_refinement_status` — idle / waiting_for_final / available / error (background daily check for more precise "final" IGS products after a campaign completes with "rapid" ones, see below)
   - `button.retry_ppp_computation` — if the campaign errors out after already downloading the IGS products (e.g. a bad `rnx2rtkp` config value), retries just that computation with the same downloaded products instead of forcing a full re-log + re-download (see below)
-  - `sensor.raw_log_buffer_hours` — hours of continuous raw log currently retained (up to `raw_log_retention_hours`), i.e. how far back `reprocess_existing_logs` can reach
-  - `button.reprocess_existing_logs` — runs a PPP-static computation over the *oldest* `ppp_campaign_duration` hours of already-logged data, with no new logging phase (see below)
+  - `sensor.raw_log_buffer_hours` — hours of continuous raw log currently retained (up to `raw_log_retention_hours`), i.e. how much of the next `button.start_ppp_campaign` press it can already satisfy without waiting
   - `button.clear_raw_log_buffer` — deletes the buffered raw log, e.g. after physically moving the receiver (see below)
   - `number.manual_latitude` / `manual_longitude` / `manual_height`
   - `button.apply_manual_position`
@@ -392,38 +391,48 @@ same data, without re-logging (hours) or re-downloading. This state is
 cleared (the button becomes a no-op) as soon as a new campaign starts,
 since starting one already discards the old campaign's working files.
 
-#### Reusing already-logged data: `button.reprocess_existing_logs`
+#### `button.start_ppp_campaign` reuses buffered data automatically
 
 The add-on always logs continuously to `/data/raw_logs` regardless of
 whether a PPP campaign is active (that's what makes `raw_log_retention_hours`
 meaningful in the first place - see above), exposed as
 `sensor.raw_log_buffer_hours` (how many hours of data are currently
 retained - 0 right after startup or after `clear_raw_log_buffer`, up to
-`raw_log_retention_hours`). `button.reprocess_existing_logs` runs the
-same PPP-static pipeline (RINEX conversion → IGS products → `rnx2rtkp`)
-directly over the **oldest** `number.ppp_campaign_duration` hours of that
-buffer - **with no new logging phase**.
+`raw_log_retention_hours`). `button.start_ppp_campaign` always targets the
+**oldest** `number.ppp_campaign_duration` hours of that buffer: if it
+already holds enough, processing (RINEX conversion → IGS products →
+`rnx2rtkp`) starts immediately, with **no logging phase at all**; if only
+part of it is buffered, the existing data counts as a head start and only
+the *missing* portion is actually logged/waited for (e.g. 4h already
+buffered + a 6h campaign only waits ~2h, not 6h); with nothing buffered
+yet, it behaves like a plain fresh campaign, logging the full duration
+from now.
 
-Using the oldest available data rather than "now" is deliberate: since
-logging never stops, the newest data is exactly as fresh (and exactly as
-unlikely to already have IGS products available - "rapid" products lag
-~17-41h behind the observation date) as a normal campaign's own
-freshly-logged data. Older, already-buffered data has had more real time
-pass and may already have products ready, sometimes needing no wait at
-all. It also recovers a campaign whose intermediate files were lost some
-way other than the computation failure covered by `retry_ppp_computation`
-above (e.g. an add-on version before 0.2.20).
+Targeting the oldest available data rather than "now" is deliberate:
+since logging never stops, the newest data is exactly as fresh (and
+exactly as unlikely to already have IGS products available - "rapid"
+products lag ~17-41h behind the observation date) as a normal campaign's
+own freshly-logged data. Older, already-buffered data has had more real
+time pass and may already have products ready, sometimes needing no wait
+at all. This also means pressing the button again recovers a campaign
+whose intermediate files were lost some way other than the computation
+failure covered by `retry_ppp_computation` above (e.g. an add-on version
+before 0.2.20), as long as the source data is still within
+`raw_log_retention_hours`: it just finds enough buffered data and skips
+straight to processing. (Before 0.2.24 this was a separate
+`button.reprocess_existing_logs`, dropped once `button.start_ppp_campaign`
+itself started preferring buffered data by construction - keeping two
+buttons whose only difference was "wait or not" no longer served a
+purpose.)
 
-It shares the same `sensor.ppp_campaign` state machine (`processing` →
-`waiting_for_products` if needed → `done`/`error`) and is mutually
-exclusive with a normal campaign/retry (only one PPP operation runs at a
-time); starting it discards any pending `retry_ppp_computation` state,
-the same way starting a new campaign does.
+Starting a campaign discards any pending `retry_ppp_computation` state,
+and only one PPP operation (campaign or computation retry) runs at a
+time.
 
 **If you've physically moved the receiver**, press
 `button.clear_raw_log_buffer` first: it deletes the buffered raw log
 files, since they describe observations from the *old* location and
-`reprocess_existing_logs` would otherwise silently compute a fix for
+`button.start_ppp_campaign` would otherwise silently compute a fix for
 where the antenna used to be. A no-op while a PPP operation is running
 (to avoid deleting data out from under it), and also supersedes/discards
 any pending refinement or computation-retry state for the same reason.
@@ -451,8 +460,8 @@ sent back to the receiver — that remains a deliberate action via
 
 #### Permanent archive of the raw logs behind a PPP position
 
-Whenever a PPP campaign (or `reprocess_existing_logs`/`retry_ppp_computation`,
-see above) successfully computes and applies a position, the exact raw
+Whenever a PPP campaign (or `retry_ppp_computation`, see above)
+successfully computes and applies a position, the exact raw
 log files that went into that computation are copied to
 `/data/ppp_source_logs/<timestamp>/` - a directory `cleanup_raw_logs()`
 never touches, so **these copies are never deleted automatically**,

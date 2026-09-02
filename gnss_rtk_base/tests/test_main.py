@@ -757,13 +757,17 @@ def test_run_ppp_campaign_clears_stale_retry_state_from_previous_attempt(monkeyp
     t.join(timeout=5)
 
 
-def test_reprocess_existing_logs_uses_oldest_buffered_data_without_relogging(monkeypatch, tmp_path):
-    """The whole point: reprocesses the OLDEST ppp_duration_hours of raw
-    log still on disk, without ever going through a "logging" phase -
-    older data is more likely to already have IGS products available
-    (more real time has passed since it was observed) than "now", which
-    is exactly as fresh, and exactly as bad a starting point for product
-    availability, as a normal campaign's own freshly-logged data."""
+def test_run_ppp_campaign_uses_oldest_buffered_data_without_relogging_when_buffer_has_enough(
+        monkeypatch, tmp_path):
+    """The whole point of unifying reprocess_existing_logs() into
+    run_ppp_campaign() (0.2.24): if the buffer already holds
+    ppp_duration_hours worth of the OLDEST raw log still on disk,
+    processing starts immediately without ever going through a "logging"
+    phase - older data is more likely to already have IGS products
+    available (more real time has passed since it was observed) than
+    "now", which is exactly as fresh, and exactly as bad a starting point
+    for product availability, as a normal campaign's own freshly-logged
+    data."""
     monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     Path(main.RAW_LOG_DIR).mkdir(parents=True)
     monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
@@ -796,7 +800,7 @@ def test_reprocess_existing_logs_uses_oldest_buffered_data_without_relogging(mon
     app = _bare_app(raw_log_retention_hours=72, ppp_duration_hours=6)
     monkeypatch.setattr(app.driver, "set_fixed_base", lambda *a, **k: None)
 
-    app.reprocess_existing_logs()
+    app.run_ppp_campaign()
 
     assert len(collected_windows) == 1
     start_ts, end_ts = collected_windows[0]
@@ -810,15 +814,55 @@ def test_reprocess_existing_logs_uses_oldest_buffered_data_without_relogging(mon
     assert app.manual_lat == 45.0
 
 
-def test_reprocess_existing_logs_errors_when_buffer_is_empty(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))  # doesn't exist: empty buffer
-    app = _bare_app(raw_log_retention_hours=72, ppp_duration_hours=6)
+def test_run_ppp_campaign_only_waits_for_the_missing_portion_when_buffer_is_partial(monkeypatch, tmp_path):
+    """If the buffer holds *some* but not enough data yet (here: ~2s
+    "old" out of a 4s campaign), the existing buffered data must count as
+    a head start - only the missing ~2s should require waiting, not the
+    full 4s from scratch."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    now = time.time()
+    oldest_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    oldest_file.write_bytes(b"old data")
+    os.utime(oldest_file, (now - 2, now - 2))  # 2s "old": a partial head start
 
-    app.reprocess_existing_logs()
+    app = _bare_app(ppp_duration_hours=4 / 3600, raw_log_retention_hours=72)  # 4s campaign
+
+    t = threading.Thread(target=app.run_ppp_campaign, daemon=True)
+    t.start()
+    time.sleep(0.3)
 
     states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
-    assert states[-1] == "error"
-    assert not app.ppp_running
+    assert "logging" in states, "2s buffered isn't enough for a 4s campaign - must still wait"
+    remaining_values = [p for k, p in app.mqtt.published if k.endswith("ppp_remaining/state")]
+    assert remaining_values, "must publish a countdown for the still-missing portion"
+    assert 0 < remaining_values[-1] <= 2, "must only wait for the missing ~2s, not the full 4s"
+
+    app.cancel_ppp_campaign()
+    t.join(timeout=5)
+
+
+def test_run_ppp_campaign_falls_back_to_fresh_logging_when_buffer_is_empty(monkeypatch, tmp_path):
+    """Regression: the old, separate reprocess_existing_logs() used to
+    error out outright if the raw log buffer was empty (e.g. right after
+    startup). Now that it's unified into run_ppp_campaign() (0.2.24), an
+    empty buffer must instead fall back to a normal fresh campaign
+    (logging from "now"), not error."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))  # doesn't exist: empty buffer
+    monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
+
+    def fake_fetch(dates, workdir, products=("FIN", "RAP")):
+        return (["sp3"], ["clk"], "atx", {dt.date(2024, 1, 15): "FIN"})
+
+    _mock_ppp_pipeline_up_to_products(monkeypatch, fake_fetch)
+    app = _bare_app(ppp_duration_hours=1 / 3600, raw_log_retention_hours=72)
+    monkeypatch.setattr(app.driver, "set_fixed_base", lambda *a, **k: None)
+
+    app.run_ppp_campaign()
+
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert "error" not in states
+    assert states[-1] == "done"
 
 
 def test_clear_raw_log_buffer_removes_files_and_resets_buffer_hours(monkeypatch, tmp_path):
@@ -852,23 +896,10 @@ def test_clear_raw_log_buffer_is_noop_while_a_ppp_operation_is_running(tmp_path,
     assert raw1.exists(), "must not delete data out from under an in-progress PPP operation"
 
 
-def test_reprocess_existing_logs_is_noop_while_a_campaign_is_running():
+def test_run_ppp_campaign_is_noop_while_already_running():
     app = _bare_app(ppp_running=True)
-    app.reprocess_existing_logs()
+    app.run_ppp_campaign()
     assert app.mqtt.published == []
-
-
-def test_reprocess_existing_logs_supersedes_pending_retry_state(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))  # doesn't exist: empty buffer -> quick error exit
-
-    app = _bare_app(raw_log_retention_hours=72)
-    app.ppp_retry_state = {"stale": True}
-
-    app.reprocess_existing_logs()
-
-    assert app.ppp_retry_state is None
-    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
-    assert states[-1] == "error"
 
 
 def test_archive_ppp_source_logs_copies_files_to_permanent_location(monkeypatch, tmp_path):
