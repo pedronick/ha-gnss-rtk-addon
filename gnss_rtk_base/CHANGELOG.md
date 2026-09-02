@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.20
+
+- Feature: if a PPP campaign fails at the very last step (`rnx2rtkp`,
+  e.g. the invalid config values fixed in 0.2.19) after the IGS products
+  were already successfully downloaded, the already-downloaded products
+  and converted RINEX files are now kept instead of being deleted. New
+  `button.retry_ppp_computation` retries just that computation step with
+  the same data - no re-logging (potentially hours), no re-downloading.
+  Superseded (becomes a no-op) as soon as a new campaign starts, since
+  starting one already discards the old campaign's working files.
+  Extracted the shared "apply position, save backup, maybe schedule
+  refinement" logic (introduced in 0.2.18) into `_compute_and_finish_ppp()`,
+  used by both the normal campaign flow and this retry path.
+
 ## 0.2.19
 
 - **Critical fix**: `PPP_CONF_TEMPLATE` used `pos1-frequency=l1+l2` and

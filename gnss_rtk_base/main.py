@@ -99,6 +99,11 @@ class App:
         # from a previous campaign, since only one refinement should be
         # active at a time.
         self.ppp_refinement_id = 0
+        # Set by _compute_and_finish_ppp() when rnx2rtkp/parsing fails
+        # after IGS products were already downloaded: holds what
+        # retry_ppp_computation() needs to retry just that step. None
+        # when there's nothing retryable.
+        self.ppp_retry_state = None
         self.manual_lat = None
         self.manual_lon = None
         self.manual_height = None
@@ -368,6 +373,9 @@ class App:
         d.publish_discovery(self.mqtt, "sensor", "ppp_refinement_status", d.sensor_config(
             "ppp_refinement_status", "PPP refinement (final products)",
             f"{BASE}/ppp_refinement_status/state", icon="mdi:satellite-variant-outline"))
+        d.publish_discovery(self.mqtt, "button", "ppp_retry_computation", d.button_config(
+            "ppp_retry_computation", "Retry PPP computation (same IGS products)",
+            f"{BASE}/ppp_retry_computation/set", icon="mdi:calculator-variant"))
         if self.caster_enabled:
             d.publish_discovery(self.mqtt, "sensor", "caster_clients", d.sensor_config(
                 "caster_clients", "Connected rovers (local caster)",
@@ -401,7 +409,8 @@ class App:
         self.publish_discovery()
         for topic in ("survey_in/set", "survey_in_cancel/set", "manual_lat/set", "manual_lon/set",
                       "manual_height/set", "apply_manual_position/set",
-                      "ppp_duration_hours/set", "ppp_start/set", "ppp_cancel/set"):
+                      "ppp_duration_hours/set", "ppp_start/set", "ppp_cancel/set",
+                      "ppp_retry_computation/set"):
             client.subscribe(f"{BASE}/{topic}")
         client.publish(f"{BASE}/survey_in/state", "idle", retain=True)
         client.publish(f"{BASE}/survey_in_remaining/state", 0, retain=True)
@@ -454,6 +463,8 @@ class App:
             threading.Thread(target=self.run_ppp_campaign, daemon=True).start()
         elif msg.topic.endswith("ppp_cancel/set"):
             self.cancel_ppp_campaign()
+        elif msg.topic.endswith("ppp_retry_computation/set"):
+            threading.Thread(target=self.retry_ppp_computation, daemon=True).start()
 
     def cancel_survey_in(self):
         if self.survey_running and self.survey_cancel_event:
@@ -649,6 +660,10 @@ class App:
         # new campaign will schedule its own if it also needs one.
         self.ppp_refinement_id += 1
         self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
+        # A fresh campaign wipes ppp_campaign_workdir below regardless, so
+        # any pending retry_ppp_computation() state from a previous failed
+        # attempt is no longer valid.
+        self.ppp_retry_state = None
         start_ts = time.time()
         duration_s = self.ppp_duration_hours * 3600
         deadline = start_ts + duration_s
@@ -739,21 +754,45 @@ class App:
                     time.sleep(min(1, retry_deadline - time.time()))
                 self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
 
+        self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
+                                      workdir, len(raw_files), tiers_used)
+
+    def _compute_and_finish_ppp(self, dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
+                                 workdir, num_raw_files, tiers_used):
+        """The final, purely computational step (rnx2rtkp + parsing the
+        result), shared by run_ppp_campaign (first attempt) and
+        retry_ppp_computation (retries only this step, reusing the same
+        already-downloaded IGS products). On success: applies/persists
+        the position and, if a less precise tier (RAP) was used, schedules
+        background refinement (see run_ppp_refinement). On failure: keeps
+        everything needed to retry via button.retry_ppp_computation
+        instead of discarding already-downloaded products and forcing a
+        full re-log + re-download - found worth doing from a real
+        campaign that finally got IGS products after ~26 hourly retries,
+        only to fail at this last step over a config bug."""
         try:
             pos_path = ppp.run_rnx2rtkp(obs_path, nav_path, sp3_paths, clk_paths, atx_path, workdir)
             lat, lon, height = ppp.parse_last_position(pos_path)
         except Exception as e:
             print("[ppp] error:", e, flush=True)
+            print("[ppp] IGS products were already downloaded - keeping them so "
+                  "button.retry_ppp_computation can retry just this step", flush=True)
+            self.ppp_retry_state = {
+                "dates": dates, "obs_path": obs_path, "nav_path": nav_path,
+                "sp3_paths": sp3_paths, "clk_paths": clk_paths, "atx_path": atx_path,
+                "workdir": workdir, "num_raw_files": num_raw_files, "tiers_used": tiers_used,
+            }
             self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
-            shutil.rmtree(workdir, ignore_errors=True)
+            self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
             self.ppp_running = False
             return
 
+        self.ppp_retry_state = None
         self.driver.set_fixed_base(self.rtcm_port, self.baud, lat, lon, height)
         print(f"[ppp] completed: {lat:.8f}, {lon:.8f}, {height:.3f} "
               f"(tiers used: {tiers_used})", flush=True)
         self.save_position_backup(lat, lon, height, "ppp",
-                                   duration_hours=self.ppp_duration_hours, num_raw_files=len(raw_files))
+                                   duration_hours=self.ppp_duration_hours, num_raw_files=num_raw_files)
         self.mqtt.publish(f"{BASE}/ppp_status/state", "done", retain=True)
         self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
         self.mqtt.publish(f"{BASE}/manual_lat/state", f"{lat:.8f}", retain=True)
@@ -775,7 +814,9 @@ class App:
         # reusable by the next campaign) and check for them once a day in
         # the background - checking as often as the main retry loop above
         # would be pointless at that latency. Superseded if a new campaign
-        # starts before this finishes (self.ppp_refinement_id changes).
+        # starts before this finishes (self.ppp_refinement_id changes,
+        # bumped by both run_ppp_campaign and retry_ppp_computation at
+        # their start).
         refinement_workdir = Path(RAW_LOG_DIR).parent / "ppp_refinement_workdir"
         shutil.rmtree(refinement_workdir, ignore_errors=True)
         workdir.rename(refinement_workdir)
@@ -787,6 +828,26 @@ class App:
             args=(refinement_id, dates, obs_path, nav_path, refinement_workdir),
             daemon=True,
         ).start()
+
+    def retry_ppp_computation(self):
+        """Retries just the final computation step (see
+        _compute_and_finish_ppp) using the same already-downloaded IGS
+        products from the last failed attempt - no re-logging, no
+        re-downloading. A no-op if there's nothing to retry (e.g. a new
+        campaign already started, which wipes ppp_campaign_workdir and,
+        with it, implicitly supersedes the retry state - see
+        run_ppp_campaign)."""
+        if self.ppp_retry_state is None or self.ppp_running:
+            return
+        state = self.ppp_retry_state
+        self.ppp_running = True
+        self.ppp_refinement_id += 1
+        self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
+        self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
+        self._compute_and_finish_ppp(
+            state["dates"], state["obs_path"], state["nav_path"], state["sp3_paths"],
+            state["clk_paths"], state["atx_path"], state["workdir"], state["num_raw_files"],
+            state["tiers_used"])
 
     def run_ppp_refinement(self, refinement_id, dates, obs_path, nav_path, workdir):
         """Runs after a campaign completes using a less precise IGS

@@ -21,6 +21,7 @@ supports u-blox ZED-F9P/M8P, and can support others with a new module in
   - `button.start_ppp_campaign` / `button.cancel_ppp_campaign` — PPP-static processing over multi-hour raw logs (centimeter-level)
   - `sensor.ppp_campaign_time_remaining` (seconds, updated every second during the logging phase and during `waiting_for_products`)
   - `sensor.ppp_refinement_status` — idle / waiting_for_final / available / error (background daily check for more precise "final" IGS products after a campaign completes with "rapid" ones, see below)
+  - `button.retry_ppp_computation` — if the campaign errors out after already downloading the IGS products (e.g. a bad `rnx2rtkp` config value), retries just that computation with the same downloaded products instead of forcing a full re-log + re-download (see below)
   - `number.manual_latitude` / `manual_longitude` / `manual_height`
   - `button.apply_manual_position`
   - `sensor.local_caster_connected_rovers` (only if `caster_enabled: true`)
@@ -375,6 +376,18 @@ receiver automatically**: reapplying it remains a deliberate action via
 changes the base's live position without explicit user action. Values:
 `idle` (nothing to refine, `FIN` was already used) / `waiting_for_final`
 / `available` / `error`.
+
+#### If the final computation step fails: `button.retry_ppp_computation`
+
+Once IGS products are successfully downloaded, only one step is left:
+running `rnx2rtkp` (RTKLIB) on them. If that step itself fails - a bad
+value in the internal PPP config being the only way this has happened so
+far - the campaign moves to `error`, but **the already-downloaded
+products and converted RINEX files are kept** instead of being deleted.
+`button.retry_ppp_computation` retries just that computation, with the
+same data, without re-logging (hours) or re-downloading. This state is
+cleared (the button becomes a no-op) as soon as a new campaign starts,
+since starting one already discards the old campaign's working files.
 
 ### Backup of the computed position
 

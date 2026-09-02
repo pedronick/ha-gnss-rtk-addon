@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +47,7 @@ def _bare_app(**overrides):
         survey_cancel_event=None,
         ppp_cancel_event=None,
         ppp_refinement_id=0,
+        ppp_retry_state=None,
         broadcaster=caster.Broadcaster(),
         _last_fix_publish=0,
     )
@@ -666,6 +668,90 @@ def test_resume_ppp_refinement_if_any_discards_incomplete_workdir(monkeypatch, t
 
     assert app.ppp_refinement_id == 0, "nothing should have been resumed"
     assert not workdir.exists()
+
+
+def test_run_ppp_campaign_keeps_retry_state_when_rnx2rtkp_fails(monkeypatch, tmp_path):
+    """Regression: rnx2rtkp failing after IGS products were already
+    downloaded (e.g. the real pos1-frequency/pos1-ionoopt config bug)
+    used to delete the workdir outright, forcing a full re-log +
+    re-download to try again. Now keeps everything so
+    button.retry_ppp_computation can retry just this step."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+
+    def fake_fetch(dates, workdir, products=("FIN", "RAP")):
+        return (["sp3"], ["clk"], "atx", {dt.date(2024, 1, 15): "RAP"})
+
+    def fake_run_rnx2rtkp(*a, **k):
+        raise RuntimeError("invalid option value pos1-frequency")
+
+    _mock_ppp_pipeline_up_to_products(monkeypatch, fake_fetch)
+    monkeypatch.setattr(ppp, "run_rnx2rtkp", fake_run_rnx2rtkp)
+
+    app = _bare_app(ppp_duration_hours=1 / 3600, raw_log_retention_hours=72)
+    app.run_ppp_campaign()
+
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert states[-1] == "error"
+    assert not app.ppp_running
+    assert app.ppp_retry_state is not None
+    assert app.ppp_retry_state["tiers_used"] == {dt.date(2024, 1, 15): "RAP"}
+    assert app.ppp_retry_state["workdir"].exists(), \
+        "must keep the workdir (already-downloaded products) instead of deleting it"
+
+
+def test_retry_ppp_computation_succeeds_with_preserved_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
+    workdir = tmp_path / "ppp_campaign_workdir"
+    workdir.mkdir()
+
+    app = _bare_app(ppp_duration_hours=6, raw_log_retention_hours=72, ppp_running=False)
+    monkeypatch.setattr(app.driver, "set_fixed_base", lambda *a, **k: None)
+    app.ppp_retry_state = {
+        "dates": [dt.date(2024, 1, 15)], "obs_path": "obs", "nav_path": "nav",
+        "sp3_paths": ["sp3"], "clk_paths": ["clk"], "atx_path": "atx",
+        "workdir": workdir, "num_raw_files": 3, "tiers_used": {dt.date(2024, 1, 15): "FIN"},
+    }
+    monkeypatch.setattr(ppp, "run_rnx2rtkp", lambda *a, **k: "pos")
+    monkeypatch.setattr(ppp, "parse_last_position", lambda *a, **k: (45.0, 9.0, 100.0))
+
+    app.retry_ppp_computation()
+
+    assert app.ppp_retry_state is None, "resolved: nothing left to retry"
+    assert app.manual_lat == 45.0
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert states[-1] == "done"
+    assert not app.ppp_running
+
+
+def test_retry_ppp_computation_is_noop_when_nothing_to_retry():
+    app = _bare_app(ppp_retry_state=None, ppp_running=False)
+    app.retry_ppp_computation()
+    assert app.mqtt.published == []
+
+
+def test_retry_ppp_computation_is_noop_while_a_campaign_is_running():
+    app = _bare_app(ppp_retry_state={"anything": True}, ppp_running=True)
+    app.retry_ppp_computation()
+    assert app.mqtt.published == []
+    assert app.ppp_retry_state is not None, "must not discard a valid retry state just because it's busy"
+
+
+def test_run_ppp_campaign_clears_stale_retry_state_from_previous_attempt(monkeypatch, tmp_path):
+    """Starting a fresh campaign wipes ppp_campaign_workdir regardless
+    (existing behavior), so any pending retry_ppp_computation() state
+    from an earlier failed attempt must be cleared too - otherwise the
+    button would appear available but operate on now-deleted files."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    app = _bare_app(ppp_duration_hours=60 / 3600, raw_log_retention_hours=72)
+    app.ppp_retry_state = {"stale": True}
+
+    t = threading.Thread(target=app.run_ppp_campaign, daemon=True)
+    t.start()
+    time.sleep(0.3)
+    assert app.ppp_retry_state is None
+
+    app.cancel_ppp_campaign()
+    t.join(timeout=5)
 
 
 def test_run_ppp_campaign_errors_once_retention_window_closes(monkeypatch, tmp_path):
