@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.25
+
+- Fixed: `run_ppp_campaign()` used to leave the campaign stuck in `error`
+  if `rnx2rtkp` ran to completion but produced no usable fix at all for
+  the auto-picked window (bad source data for that specific window, e.g.
+  missing ephemeris in the raw log covering it - not a config or
+  products problem) - found from a real campaign where this happened on
+  the oldest buffered window. Retrying the same data (as
+  `button.retry_ppp_computation` does for other failures) would just
+  fail identically, so this case is now handled differently: the
+  offending raw log files are permanently discarded and the next-oldest
+  buffered window is tried automatically, with no user action needed,
+  bounded by the buffer eventually running out (falls back to a plain
+  fresh campaign at that point).
+
 ## 0.2.24
 
 - Unified `button.reprocess_existing_logs` into `button.start_ppp_campaign`

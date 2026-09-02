@@ -724,6 +724,19 @@ class App:
         -> processing again (rnx2rtkp) -> done. Cancellable at every step,
         including while waiting.
 
+        If rnx2rtkp runs to completion but produces no usable fix at all
+        for a window (bad source data for that specific window, e.g.
+        missing ephemeris in the raw log covering it - not a config or
+        products problem), _compute_and_finish_ppp() discards that
+        window's raw files and returns "no_fix" instead of leaving it for
+        button.retry_ppp_computation (retrying the exact same data would
+        just fail identically): found from a real campaign where the
+        oldest buffered window (auto-picked, see above) processed to
+        completion but every epoch came back with no fix. This loops back
+        and automatically picks the new oldest window instead, bounded by
+        the buffer eventually running out (falls back to a plain fresh
+        campaign, logging from "now", same as an empty buffer).
+
         "done" here means a fix was applied - usually from "rapid" (RAP)
         products, since "final" (FIN, more precise) ones take ~11-18 days
         and aren't worth blocking on. If RAP was used, this schedules a
@@ -745,59 +758,67 @@ class App:
         # attempt is no longer valid.
         self.ppp_retry_state = None
 
-        oldest_ts = self._oldest_raw_log_ts()
-        start_ts = oldest_ts if oldest_ts is not None else time.time()
-        deadline = start_ts + self.ppp_duration_hours * 3600
-        remaining = deadline - time.time()
+        while True:
+            oldest_ts = self._oldest_raw_log_ts()
+            start_ts = oldest_ts if oldest_ts is not None else time.time()
+            deadline = start_ts + self.ppp_duration_hours * 3600
+            remaining = deadline - time.time()
 
-        if remaining <= 0:
-            print(f"[ppp] campaign started: {self.ppp_duration_hours}h already available in the "
-                  "buffer, skipping straight to processing", flush=True)
-        else:
-            self.mqtt.publish(f"{BASE}/ppp_status/state", "logging", retain=True)
-            print(f"[ppp] campaign started, duration {self.ppp_duration_hours}h "
-                  f"({remaining / 3600:.1f}h still to log" +
-                  (", using buffered data as a head start)" if oldest_ts is not None else ")"), flush=True)
-            while True:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    break
-                if self.ppp_cancel_event.is_set():
-                    print("[ppp] campaign cancelled by the user during logging", flush=True)
-                    self.mqtt.publish(f"{BASE}/ppp_status/state", "cancelled", retain=True)
-                    self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
-                    self.ppp_running = False
-                    return
-                self.mqtt.publish(f"{BASE}/ppp_remaining/state", int(remaining), retain=True)
-                time.sleep(min(1, remaining))
-            self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
+            if remaining <= 0:
+                print(f"[ppp] campaign started: {self.ppp_duration_hours}h already available in the "
+                      "buffer, skipping straight to processing", flush=True)
+            else:
+                self.mqtt.publish(f"{BASE}/ppp_status/state", "logging", retain=True)
+                print(f"[ppp] campaign started, duration {self.ppp_duration_hours}h "
+                      f"({remaining / 3600:.1f}h still to log" +
+                      (", using buffered data as a head start)" if oldest_ts is not None else ")"), flush=True)
+                while True:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        break
+                    if self.ppp_cancel_event.is_set():
+                        print("[ppp] campaign cancelled by the user during logging", flush=True)
+                        self.mqtt.publish(f"{BASE}/ppp_status/state", "cancelled", retain=True)
+                        self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
+                        self.ppp_running = False
+                        return
+                    self.mqtt.publish(f"{BASE}/ppp_remaining/state", int(remaining), retain=True)
+                    time.sleep(min(1, remaining))
+                self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
 
-        end_ts = deadline
-        self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
-        workdir = self._fresh_ppp_workdir()
-        try:
-            obs_path, nav_path, dates, raw_files = self._convert_raw_window_to_rinex(start_ts, end_ts, workdir)
-        except Exception as e:
-            print("[ppp] error:", e, flush=True)
-            self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
-            shutil.rmtree(workdir, ignore_errors=True)
-            self.ppp_running = False
-            return
+            end_ts = deadline
+            self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
+            workdir = self._fresh_ppp_workdir()
+            try:
+                obs_path, nav_path, dates, raw_files = self._convert_raw_window_to_rinex(start_ts, end_ts, workdir)
+            except Exception as e:
+                print("[ppp] error:", e, flush=True)
+                self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
+                shutil.rmtree(workdir, ignore_errors=True)
+                self.ppp_running = False
+                return
 
-        # Bounded by when the *oldest* file in this window would be
-        # rotated out by cleanup_raw_logs() (raw_log_retention_hours after
-        # its own mtime) - correct whether start_ts came from the buffer
-        # (already old) or was "now" (a brand new campaign).
-        wait_deadline = start_ts + self.raw_log_retention_hours * 3600
-        result = self._wait_for_products(dates, workdir, wait_deadline)
-        if result is None:  # already published its own status (cancelled/error)
-            shutil.rmtree(workdir, ignore_errors=True)
-            self.ppp_running = False
-            return
-        sp3_paths, clk_paths, atx_path, tiers_used = result
+            # Bounded by when the *oldest* file in this window would be
+            # rotated out by cleanup_raw_logs() (raw_log_retention_hours
+            # after its own mtime) - correct whether start_ts came from
+            # the buffer (already old) or was "now" (a brand new
+            # campaign).
+            wait_deadline = start_ts + self.raw_log_retention_hours * 3600
+            result = self._wait_for_products(dates, workdir, wait_deadline)
+            if result is None:  # already published its own status (cancelled/error)
+                shutil.rmtree(workdir, ignore_errors=True)
+                self.ppp_running = False
+                return
+            sp3_paths, clk_paths, atx_path, tiers_used = result
 
-        self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
-                                      workdir, raw_files, tiers_used, self.ppp_duration_hours)
+            outcome = self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
+                                                     workdir, raw_files, tiers_used, self.ppp_duration_hours)
+            if outcome != "no_fix":
+                return
+            # ppp_running is deliberately left True across this loop-back
+            # (only _compute_and_finish_ppp's other outcomes reset it) -
+            # this is still the same campaign, picking a different window.
+            print("[ppp] trying the next-oldest window instead", flush=True)
 
     def _fresh_ppp_workdir(self):
         """Derived from RAW_LOG_DIR (not hardcoded "/data") so that
@@ -877,16 +898,36 @@ class App:
         """The final, purely computational step (rnx2rtkp + parsing the
         result), shared by run_ppp_campaign and retry_ppp_computation
         (retries only this step, reusing the same already-downloaded IGS
-        products). On success: applies/persists the position, permanently
+        products). Returns "done", "error", or "no_fix" - callers that
+        loop (run_ppp_campaign) use it to decide whether to try a
+        different window; callers that don't (retry_ppp_computation) use
+        it to know whether they still need to reset ppp_running
+        themselves (see below).
+
+        On success ("done"): applies/persists the position, permanently
         archives the exact raw log files behind it (see
         _archive_ppp_source_logs) and, if a less precise tier (RAP) was
         used, schedules background refinement (see run_ppp_refinement).
-        On failure: keeps everything needed to retry via
-        button.retry_ppp_computation instead of discarding
-        already-downloaded products and forcing a full re-log +
-        re-download - found worth doing from a real campaign that finally
-        got IGS products after ~26 hourly retries, only to fail at this
-        last step over a config bug.
+
+        On a config/computation failure ("error"): keeps everything
+        needed to retry via button.retry_ppp_computation instead of
+        discarding already-downloaded products and forcing a full re-log
+        + re-download - found worth doing from a real campaign that
+        finally got IGS products after ~26 hourly retries, only to fail
+        at this last step over a config bug.
+
+        On rnx2rtkp running to completion but producing no usable fix at
+        all ("no_fix"): unlike the above, retrying the same computation
+        on the same data would just fail identically (bad source data for
+        this specific window, not a fixable config/products issue), so
+        instead the offending raw log files are permanently discarded -
+        found from a real campaign where the auto-picked oldest buffered
+        window processed to completion with every epoch coming back with
+        no fix. Deliberately does NOT reset ppp_running here (unlike the
+        other two outcomes): run_ppp_campaign's loop treats "no_fix" as
+        "same campaign, try the next window" and needs the flag to stay
+        True across that loop-back; retry_ppp_computation (a one-shot,
+        non-looping caller) resets it itself when it sees "no_fix".
 
         duration_hours is only informational (position_backup metadata):
         passed in (as self.ppp_duration_hours, since run_ppp_campaign's
@@ -897,6 +938,19 @@ class App:
         try:
             pos_path = ppp.run_rnx2rtkp(obs_path, nav_path, sp3_paths, clk_paths, atx_path, workdir)
             lat, lon, height = ppp.parse_last_position(pos_path)
+        except ValueError as e:
+            print("[ppp] error:", e, flush=True)
+            print("[ppp] discarding this window's raw log files - trying different data instead", flush=True)
+            for raw_file in raw_files:
+                try:
+                    os.remove(raw_file)
+                except OSError:
+                    pass
+            self._publish_raw_log_buffer_hours()
+            shutil.rmtree(workdir, ignore_errors=True)
+            self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
+            self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
+            return "no_fix"
         except Exception as e:
             print("[ppp] error:", e, flush=True)
             print("[ppp] IGS products were already downloaded - keeping them so "
@@ -910,7 +964,7 @@ class App:
             self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
             self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
             self.ppp_running = False
-            return
+            return "error"
 
         self.ppp_retry_state = None
         self.driver.set_fixed_base(self.rtcm_port, self.baud, lat, lon, height)
@@ -931,7 +985,7 @@ class App:
             # Already the best available tier - nothing to refine later.
             shutil.rmtree(workdir, ignore_errors=True)
             self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
-            return
+            return "done"
 
         # A less precise tier (RAP) was used for at least one date: "final"
         # products (more precise) may still show up later, published
@@ -954,6 +1008,7 @@ class App:
             args=(refinement_id, dates, obs_path, nav_path, refinement_workdir),
             daemon=True,
         ).start()
+        return "done"
 
     def _archive_ppp_source_logs(self, raw_files, computed_at):
         """Permanently preserves a copy of the exact raw log files that
@@ -998,10 +1053,16 @@ class App:
         self.ppp_refinement_id += 1
         self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
         self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
-        self._compute_and_finish_ppp(
+        outcome = self._compute_and_finish_ppp(
             state["dates"], state["obs_path"], state["nav_path"], state["sp3_paths"],
             state["clk_paths"], state["atx_path"], state["workdir"], state["raw_files"],
             state["tiers_used"], state["duration_hours"])
+        if outcome == "no_fix":
+            # Unlike run_ppp_campaign, this is a one-shot call with no loop
+            # to pick a different window - _compute_and_finish_ppp
+            # deliberately left ppp_running True for that looping case, so
+            # this caller has to reset it itself.
+            self.ppp_running = False
 
     def run_ppp_refinement(self, refinement_id, dates, obs_path, nav_path, workdir):
         """Runs after a campaign completes using a less precise IGS

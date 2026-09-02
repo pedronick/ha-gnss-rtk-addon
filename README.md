@@ -382,14 +382,29 @@ changes the base's live position without explicit user action. Values:
 #### If the final computation step fails: `button.retry_ppp_computation`
 
 Once IGS products are successfully downloaded, only one step is left:
-running `rnx2rtkp` (RTKLIB) on them. If that step itself fails - a bad
-value in the internal PPP config being the only way this has happened so
-far - the campaign moves to `error`, but **the already-downloaded
-products and converted RINEX files are kept** instead of being deleted.
-`button.retry_ppp_computation` retries just that computation, with the
-same data, without re-logging (hours) or re-downloading. This state is
-cleared (the button becomes a no-op) as soon as a new campaign starts,
-since starting one already discards the old campaign's working files.
+running `rnx2rtkp` (RTKLIB) on them. If that step itself fails with a
+*recoverable* error - a bad value in the internal PPP config being the
+only way this has happened so far - the campaign moves to `error`, but
+**the already-downloaded products and converted RINEX files are kept**
+instead of being deleted. `button.retry_ppp_computation` retries just
+that computation, with the same data, without re-logging (hours) or
+re-downloading. This state is cleared (the button becomes a no-op) as
+soon as a new campaign starts, since starting one already discards the
+old campaign's working files.
+
+If instead `rnx2rtkp` runs to completion but produces **no usable fix at
+all** for that window (found from a real campaign: bad source data for
+that specific window, e.g. missing ephemeris in the raw log covering it
+- not a config or products problem), retrying the exact same data would
+just fail identically. `button.start_ppp_campaign` handles this
+differently from the case above: it permanently discards that window's
+raw log files and automatically tries the next-oldest buffered window
+instead, without any user action needed - `sensor.ppp_campaign` briefly
+shows `error` for the discarded window before moving straight back to
+`processing` with the new one, bounded by the buffer eventually running
+out (falls back to a plain fresh campaign at that point).
+`button.retry_ppp_computation` has nothing to offer here, since there's
+no fixable state behind a "no fix" outcome to retry.
 
 #### `button.start_ppp_campaign` reuses buffered data automatically
 

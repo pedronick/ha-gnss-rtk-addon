@@ -699,6 +699,64 @@ def test_run_ppp_campaign_keeps_retry_state_when_rnx2rtkp_fails(monkeypatch, tmp
         "must keep the workdir (already-downloaded products) instead of deleting it"
 
 
+def test_run_ppp_campaign_discards_no_fix_window_and_tries_next_oldest(monkeypatch, tmp_path):
+    """Regression: rnx2rtkp can run to completion but produce no usable
+    fix at all for a specific window (bad source data, e.g. missing
+    ephemeris) - found from a real campaign where the auto-picked oldest
+    buffered window processed fully but every epoch came back with no
+    fix. Retrying the exact same data (as button.retry_ppp_computation
+    does for other failures) would just fail identically, so the
+    offending raw files must be discarded and a different (here: the
+    next-oldest) window tried automatically instead of leaving the
+    campaign stuck in "error" forever."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
+
+    now = time.time()
+    bad_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011400.rtcm3"
+    bad_file.write_bytes(b"bad data")
+    os.utime(bad_file, (now - 40 * 3600, now - 40 * 3600))
+    good_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    good_file.write_bytes(b"good data")
+    os.utime(good_file, (now - 20 * 3600, now - 20 * 3600))
+
+    def fake_collect(raw_log_dir, start_ts, end_ts):
+        return [str(bad_file)] if bad_file.exists() else [str(good_file)]
+
+    monkeypatch.setattr(ppp, "collect_raw_files", fake_collect)
+    monkeypatch.setattr(ppp, "concat_raw_files", lambda *a, **k: None)
+    monkeypatch.setattr(ppp, "convbin", lambda *a, **k: ("obs", "nav"))
+    monkeypatch.setattr(ppp, "parse_obs_dates", lambda *a, **k: [dt.date(2024, 1, 15)])
+    monkeypatch.setattr(ppp, "fetch_precise_products",
+                         lambda dates, workdir, products=("FIN", "RAP"):
+                         (["sp3"], ["clk"], "atx", {dt.date(2024, 1, 15): "FIN"}))
+    monkeypatch.setattr(ppp, "run_rnx2rtkp", lambda *a, **k: "pos")
+
+    results = iter([ValueError("No valid epoch found in result.pos"), (45.0, 9.0, 100.0)])
+
+    def fake_parse_last_position(pos_path):
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(ppp, "parse_last_position", fake_parse_last_position)
+
+    app = _bare_app(raw_log_retention_hours=72, ppp_duration_hours=6)
+    monkeypatch.setattr(app.driver, "set_fixed_base", lambda *a, **k: None)
+
+    app.run_ppp_campaign()
+
+    assert not bad_file.exists(), "the no-fix window's raw files must be discarded"
+    assert good_file.exists(), "unrelated buffered data must be left alone"
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert "error" in states, "the failed window must still be visible as an intermediate error"
+    assert states[-1] == "done", "must automatically continue to the next window and succeed"
+    assert app.manual_lat == 45.0
+    assert not app.ppp_running
+
+
 def test_retry_ppp_computation_succeeds_with_preserved_state(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
@@ -737,6 +795,42 @@ def test_retry_ppp_computation_is_noop_while_a_campaign_is_running():
     app.retry_ppp_computation()
     assert app.mqtt.published == []
     assert app.ppp_retry_state is not None, "must not discard a valid retry state just because it's busy"
+
+
+def test_retry_ppp_computation_resets_running_flag_and_discards_files_on_no_fix(monkeypatch, tmp_path):
+    """Unlike run_ppp_campaign (which loops to try a different window and
+    deliberately leaves ppp_running True across that loop-back),
+    retry_ppp_computation is a one-shot call: if the retried computation
+    also comes back with no usable fix, there's no loop to reset the flag
+    for it, so it must do so itself - otherwise the add-on would be stuck
+    thinking a PPP operation is still running forever."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    workdir = tmp_path / "ppp_campaign_workdir"
+    workdir.mkdir()
+    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    raw1.write_bytes(b"data")
+
+    def raise_no_fix(pos_path):
+        raise ValueError("No valid epoch found in result.pos")
+
+    app = _bare_app(ppp_duration_hours=6, raw_log_retention_hours=72, ppp_running=False)
+    app.ppp_retry_state = {
+        "dates": [dt.date(2024, 1, 15)], "obs_path": "obs", "nav_path": "nav",
+        "sp3_paths": ["sp3"], "clk_paths": ["clk"], "atx_path": "atx",
+        "workdir": workdir, "raw_files": [str(raw1)],
+        "tiers_used": {dt.date(2024, 1, 15): "FIN"},
+        "duration_hours": 6,
+    }
+    monkeypatch.setattr(ppp, "run_rnx2rtkp", lambda *a, **k: "pos")
+    monkeypatch.setattr(ppp, "parse_last_position", raise_no_fix)
+
+    app.retry_ppp_computation()
+
+    assert not app.ppp_running, "must reset the flag itself - no loop does it on this path"
+    assert not raw1.exists(), "the no-fix data must be discarded here too"
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert states[-1] == "error"
 
 
 def test_run_ppp_campaign_clears_stale_retry_state_from_previous_attempt(monkeypatch, tmp_path):
