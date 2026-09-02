@@ -710,6 +710,7 @@ def test_retry_ppp_computation_succeeds_with_preserved_state(monkeypatch, tmp_pa
         "dates": [dt.date(2024, 1, 15)], "obs_path": "obs", "nav_path": "nav",
         "sp3_paths": ["sp3"], "clk_paths": ["clk"], "atx_path": "atx",
         "workdir": workdir, "num_raw_files": 3, "tiers_used": {dt.date(2024, 1, 15): "FIN"},
+        "duration_hours": 6,
     }
     monkeypatch.setattr(ppp, "run_rnx2rtkp", lambda *a, **k: "pos")
     monkeypatch.setattr(ppp, "parse_last_position", lambda *a, **k: (45.0, 9.0, 100.0))
@@ -752,6 +753,67 @@ def test_run_ppp_campaign_clears_stale_retry_state_from_previous_attempt(monkeyp
 
     app.cancel_ppp_campaign()
     t.join(timeout=5)
+
+
+def test_reprocess_existing_logs_uses_retained_raw_files_without_relogging(monkeypatch, tmp_path):
+    """The whole point: reprocesses whatever raw log files are still on
+    disk (governed by raw_log_retention_hours) without ever going through
+    a "logging" phase - found worth adding after a real campaign's
+    intermediate files were lost (before retry_ppp_computation existed),
+    even though the underlying raw logs were still within retention."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
+
+    collected_windows = []
+
+    def fake_collect(raw_log_dir, start_ts, end_ts):
+        collected_windows.append((start_ts, end_ts))
+        return ["fake1.rtcm3", "fake2.rtcm3"]
+
+    def fake_fetch(dates, workdir, products=("FIN", "RAP")):
+        return (["sp3"], ["clk"], "atx", {dt.date(2024, 1, 15): "FIN"})
+
+    monkeypatch.setattr(ppp, "collect_raw_files", fake_collect)
+    monkeypatch.setattr(ppp, "concat_raw_files", lambda *a, **k: None)
+    monkeypatch.setattr(ppp, "convbin", lambda *a, **k: ("obs", "nav"))
+    monkeypatch.setattr(ppp, "parse_obs_dates", lambda *a, **k: [dt.date(2024, 1, 15)])
+    monkeypatch.setattr(ppp, "fetch_precise_products", fake_fetch)
+    monkeypatch.setattr(ppp, "run_rnx2rtkp", lambda *a, **k: "pos")
+    monkeypatch.setattr(ppp, "parse_last_position", lambda *a, **k: (45.0, 9.0, 100.0))
+
+    app = _bare_app(raw_log_retention_hours=72)
+    monkeypatch.setattr(app.driver, "set_fixed_base", lambda *a, **k: None)
+
+    app.reprocess_existing_logs()
+
+    assert len(collected_windows) == 1
+    start_ts, end_ts = collected_windows[0]
+    assert (end_ts - start_ts) / 3600 == pytest.approx(72, rel=0.01), \
+        "window must span raw_log_retention_hours, i.e. everything still retained"
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert "logging" not in states, "must not go through a logging phase"
+    assert states[-1] == "done"
+    assert app.manual_lat == 45.0
+
+
+def test_reprocess_existing_logs_is_noop_while_a_campaign_is_running():
+    app = _bare_app(ppp_running=True)
+    app.reprocess_existing_logs()
+    assert app.mqtt.published == []
+
+
+def test_reprocess_existing_logs_supersedes_pending_retry_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(ppp, "collect_raw_files", lambda *a, **k: [])  # no files -> quick error exit
+
+    app = _bare_app(raw_log_retention_hours=72)
+    app.ppp_retry_state = {"stale": True}
+
+    app.reprocess_existing_logs()
+
+    assert app.ppp_retry_state is None
+    states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
+    assert states[-1] == "error"
 
 
 def test_run_ppp_campaign_errors_once_retention_window_closes(monkeypatch, tmp_path):

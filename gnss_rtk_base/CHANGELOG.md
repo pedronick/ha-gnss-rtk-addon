@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.21
+
+- Feature: new `button.reprocess_existing_logs` runs the PPP-static
+  pipeline (RINEX conversion → IGS products → `rnx2rtkp`) directly over
+  whatever raw log files are still retained on disk (up to
+  `raw_log_retention_hours` back), with no new logging phase. Recovers a
+  campaign whose intermediate files were lost some way other than the
+  computation failure `retry_ppp_computation` (0.2.20) already covers -
+  the underlying raw logs are independently retained regardless of
+  whether a campaign is running, so nothing is actually lost as long as
+  they're still within the retention window. Shares the same
+  `sensor.ppp_campaign` state machine and is mutually exclusive with a
+  normal campaign/retry.
+- Refactored `run_ppp_campaign()`'s raw-to-RINEX conversion and IGS
+  product retry-wait into `_convert_raw_window_to_rinex()` and
+  `_wait_for_products()`, now shared with `reprocess_existing_logs()`
+  instead of being campaign-specific.
+
 ## 0.2.20
 
 - Feature: if a PPP campaign fails at the very last step (`rnx2rtkp`,

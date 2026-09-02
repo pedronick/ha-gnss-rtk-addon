@@ -376,6 +376,9 @@ class App:
         d.publish_discovery(self.mqtt, "button", "ppp_retry_computation", d.button_config(
             "ppp_retry_computation", "Retry PPP computation (same IGS products)",
             f"{BASE}/ppp_retry_computation/set", icon="mdi:calculator-variant"))
+        d.publish_discovery(self.mqtt, "button", "ppp_reprocess", d.button_config(
+            "ppp_reprocess", "Reprocess existing raw logs (no new logging)",
+            f"{BASE}/ppp_reprocess/set", icon="mdi:database-refresh"))
         if self.caster_enabled:
             d.publish_discovery(self.mqtt, "sensor", "caster_clients", d.sensor_config(
                 "caster_clients", "Connected rovers (local caster)",
@@ -410,7 +413,7 @@ class App:
         for topic in ("survey_in/set", "survey_in_cancel/set", "manual_lat/set", "manual_lon/set",
                       "manual_height/set", "apply_manual_position/set",
                       "ppp_duration_hours/set", "ppp_start/set", "ppp_cancel/set",
-                      "ppp_retry_computation/set"):
+                      "ppp_retry_computation/set", "ppp_reprocess/set"):
             client.subscribe(f"{BASE}/{topic}")
         client.publish(f"{BASE}/survey_in/state", "idle", retain=True)
         client.publish(f"{BASE}/survey_in_remaining/state", 0, retain=True)
@@ -465,6 +468,8 @@ class App:
             self.cancel_ppp_campaign()
         elif msg.topic.endswith("ppp_retry_computation/set"):
             threading.Thread(target=self.retry_ppp_computation, daemon=True).start()
+        elif msg.topic.endswith("ppp_reprocess/set"):
+            threading.Thread(target=self.reprocess_existing_logs, daemon=True).start()
 
     def cancel_survey_in(self):
         if self.survey_running and self.survey_cancel_event:
@@ -686,26 +691,9 @@ class App:
         self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
 
         self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
-        # Derived from RAW_LOG_DIR (not hardcoded "/data") so that
-        # monkeypatching main.RAW_LOG_DIR (as the test suite and the
-        # standalone test harness do, to run outside /data) also
-        # redirects this workdir - otherwise it silently kept trying to
-        # create it under the real "/data", which doesn't exist/isn't
-        # writable outside the container. Not a tempfile.TemporaryDirectory
-        # (auto-deleted on exit) any more: it must survive the
-        # waiting_for_products retry loop below, which can run for hours.
-        workdir = Path(RAW_LOG_DIR).parent / "ppp_campaign_workdir"
-        if workdir.exists():
-            shutil.rmtree(workdir)
-        workdir.mkdir(parents=True)
+        workdir = self._fresh_ppp_workdir()
         try:
-            raw_files = ppp.collect_raw_files(RAW_LOG_DIR, start_ts, end_ts)
-            if not raw_files:
-                raise RuntimeError("No raw log file found for the campaign window")
-            raw_concat = workdir / "campaign.rtcm3"
-            ppp.concat_raw_files(raw_files, raw_concat)
-            obs_path, nav_path = ppp.convbin(str(raw_concat), str(workdir))
-            dates = ppp.parse_obs_dates(obs_path)
+            obs_path, nav_path, dates, raw_files = self._convert_raw_window_to_rinex(start_ts, end_ts, workdir)
         except Exception as e:
             print("[ppp] error:", e, flush=True)
             self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
@@ -713,35 +701,130 @@ class App:
             self.ppp_running = False
             return
 
-        # IGS precise products may not be published yet for such a recent
-        # date (FIN: ~11-18 days, RAP: ~17-41h after the observation date)
-        # - found from a real campaign that failed outright the moment it
-        # started processing. Retry instead of failing immediately, bounded
-        # by raw_log_retention_hours: retrying past that point is pointless,
-        # cleanup_raw_logs() will already have deleted the source raw log by
-        # then anyway.
         wait_deadline = end_ts + self.raw_log_retention_hours * 3600
-        sp3_paths = clk_paths = atx_path = tiers_used = None
-        while sp3_paths is None:
+        result = self._wait_for_products(dates, workdir, wait_deadline)
+        if result is None:  # already published its own status (cancelled/error)
+            shutil.rmtree(workdir, ignore_errors=True)
+            self.ppp_running = False
+            return
+        sp3_paths, clk_paths, atx_path, tiers_used = result
+
+        self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
+                                      workdir, len(raw_files), tiers_used, self.ppp_duration_hours)
+
+    def reprocess_existing_logs(self):
+        """Reprocesses whatever raw log files are still on disk (governed
+        by raw_log_retention_hours) as a PPP-static campaign, without a
+        new logging phase. Recovers a campaign whose intermediate files
+        were already lost - the whole point of retry_ppp_computation is
+        to avoid ever needing this again for a *computation* failure, but
+        it doesn't help if the files were lost some other way (e.g. an
+        add-on version before 0.2.20, or the retention window rotating
+        out a raw file while waiting for IGS products). Found worth
+        adding after a real campaign's intermediate files were lost this
+        way before retry_ppp_computation existed.
+
+        Shares ppp_running/ppp_cancel_event/ppp_retry_state with
+        run_ppp_campaign: only one PPP operation (campaign, reprocess, or
+        computation retry) runs at a time, and starting this one
+        supersedes/discards whatever the other left behind, same as
+        starting a new campaign does."""
+        if self.ppp_running:
+            return
+        self.ppp_running = True
+        self.ppp_cancel_event = threading.Event()
+        self.ppp_refinement_id += 1
+        self.mqtt.publish(f"{BASE}/ppp_refinement_status/state", "idle", retain=True)
+        self.ppp_retry_state = None
+        self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
+        print("[ppp] reprocessing existing raw logs (no new logging phase)", flush=True)
+
+        workdir = self._fresh_ppp_workdir()
+        now = time.time()
+        start_ts = now - self.raw_log_retention_hours * 3600
+        try:
+            obs_path, nav_path, dates, raw_files = self._convert_raw_window_to_rinex(start_ts, now, workdir)
+        except Exception as e:
+            print("[ppp] error:", e, flush=True)
+            self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
+            shutil.rmtree(workdir, ignore_errors=True)
+            self.ppp_running = False
+            return
+
+        wait_deadline = now + self.raw_log_retention_hours * 3600
+        result = self._wait_for_products(dates, workdir, wait_deadline)
+        if result is None:
+            shutil.rmtree(workdir, ignore_errors=True)
+            self.ppp_running = False
+            return
+        sp3_paths, clk_paths, atx_path, tiers_used = result
+
+        # len(raw_files) approximates the covered duration in hours (files
+        # rotate hourly) - only used for the position backup's metadata.
+        self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
+                                      workdir, len(raw_files), tiers_used, len(raw_files))
+
+    def _fresh_ppp_workdir(self):
+        """Derived from RAW_LOG_DIR (not hardcoded "/data") so that
+        monkeypatching main.RAW_LOG_DIR (as the test suite and the
+        standalone test harness do, to run outside /data) also redirects
+        this workdir - otherwise it silently kept trying to create it
+        under the real "/data", which doesn't exist/isn't writable
+        outside the container. Not a tempfile.TemporaryDirectory
+        (auto-deleted on exit): it must survive the waiting_for_products
+        retry loop, which can run for hours."""
+        workdir = Path(RAW_LOG_DIR).parent / "ppp_campaign_workdir"
+        if workdir.exists():
+            shutil.rmtree(workdir)
+        workdir.mkdir(parents=True)
+        return workdir
+
+    def _convert_raw_window_to_rinex(self, start_ts, end_ts, workdir):
+        """Raw log files covering [start_ts, end_ts] -> concatenated ->
+        RINEX (convbin) -> observation dates. Raises on failure (no files
+        found for the window, convbin error) - the caller decides how to
+        report/clean up."""
+        raw_files = ppp.collect_raw_files(RAW_LOG_DIR, start_ts, end_ts)
+        if not raw_files:
+            raise RuntimeError("No raw log file found for the given window")
+        raw_concat = workdir / "campaign.rtcm3"
+        ppp.concat_raw_files(raw_files, raw_concat)
+        obs_path, nav_path = ppp.convbin(str(raw_concat), str(workdir))
+        dates = ppp.parse_obs_dates(obs_path)
+        return obs_path, nav_path, dates, raw_files
+
+    def _wait_for_products(self, dates, workdir, wait_deadline):
+        """Polls ppp.fetch_precise_products every
+        PPP_PRODUCT_RETRY_INTERVAL_S until it succeeds, the operation is
+        cancelled, or wait_deadline passes - IGS precise products may not
+        be published yet for such a recent date (FIN: ~11-18 days, RAP:
+        ~17-41h after the observation date), found from a real campaign
+        that used to fail outright the moment it started processing.
+        wait_deadline is normally end_ts + raw_log_retention_hours:
+        retrying past that point is pointless, cleanup_raw_logs() will
+        already have deleted the source raw log by then anyway.
+
+        Returns (sp3_paths, clk_paths, atx_path, tiers_used) on success,
+        or None if cancelled/timed out - in that case ppp_status
+        ("cancelled" or "error") and ppp_remaining have already been
+        published; the caller only needs to clean up workdir and reset
+        ppp_running."""
+        while True:
             try:
-                sp3_paths, clk_paths, atx_path, tiers_used = ppp.fetch_precise_products(dates, workdir)
+                return ppp.fetch_precise_products(dates, workdir)
             except Exception as e:
                 if self.ppp_cancel_event.is_set():
-                    print("[ppp] campaign cancelled by the user while waiting for IGS products", flush=True)
+                    print("[ppp] cancelled by the user while waiting for IGS products", flush=True)
                     self.mqtt.publish(f"{BASE}/ppp_status/state", "cancelled", retain=True)
                     self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
-                    shutil.rmtree(workdir, ignore_errors=True)
-                    self.ppp_running = False
-                    return
+                    return None
                 remaining_wait = wait_deadline - time.time()
                 if remaining_wait <= 0:
                     print(f"[ppp] error: IGS products still unavailable after waiting until the raw "
                           f"log retention window closed ({e})", flush=True)
                     self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
                     self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
-                    shutil.rmtree(workdir, ignore_errors=True)
-                    self.ppp_running = False
-                    return
+                    return None
                 print(f"[ppp] IGS products not available yet ({e}), retrying in "
                       f"{PPP_PRODUCT_RETRY_INTERVAL_S}s...", flush=True)
                 self.mqtt.publish(f"{BASE}/ppp_status/state", "waiting_for_products", retain=True)
@@ -754,22 +837,27 @@ class App:
                     time.sleep(min(1, retry_deadline - time.time()))
                 self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
 
-        self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
-                                      workdir, len(raw_files), tiers_used)
-
     def _compute_and_finish_ppp(self, dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
-                                 workdir, num_raw_files, tiers_used):
+                                 workdir, num_raw_files, tiers_used, duration_hours):
         """The final, purely computational step (rnx2rtkp + parsing the
-        result), shared by run_ppp_campaign (first attempt) and
-        retry_ppp_computation (retries only this step, reusing the same
-        already-downloaded IGS products). On success: applies/persists
-        the position and, if a less precise tier (RAP) was used, schedules
-        background refinement (see run_ppp_refinement). On failure: keeps
-        everything needed to retry via button.retry_ppp_computation
-        instead of discarding already-downloaded products and forcing a
-        full re-log + re-download - found worth doing from a real
-        campaign that finally got IGS products after ~26 hourly retries,
-        only to fail at this last step over a config bug."""
+        result), shared by run_ppp_campaign (first attempt),
+        reprocess_existing_logs, and retry_ppp_computation (retries only
+        this step, reusing the same already-downloaded IGS products). On
+        success: applies/persists the position and, if a less precise
+        tier (RAP) was used, schedules background refinement (see
+        run_ppp_refinement). On failure: keeps everything needed to retry
+        via button.retry_ppp_computation instead of discarding
+        already-downloaded products and forcing a full re-log +
+        re-download - found worth doing from a real campaign that finally
+        got IGS products after ~26 hourly retries, only to fail at this
+        last step over a config bug.
+
+        duration_hours is only informational (position_backup metadata):
+        the configured campaign duration for a normal run, or an estimate
+        of the reprocessed window's span otherwise - passed in rather
+        than read from self.ppp_duration_hours so it stays accurate for
+        reprocess_existing_logs/retry_ppp_computation, which don't
+        necessarily match that number entity's current value."""
         try:
             pos_path = ppp.run_rnx2rtkp(obs_path, nav_path, sp3_paths, clk_paths, atx_path, workdir)
             lat, lon, height = ppp.parse_last_position(pos_path)
@@ -781,6 +869,7 @@ class App:
                 "dates": dates, "obs_path": obs_path, "nav_path": nav_path,
                 "sp3_paths": sp3_paths, "clk_paths": clk_paths, "atx_path": atx_path,
                 "workdir": workdir, "num_raw_files": num_raw_files, "tiers_used": tiers_used,
+                "duration_hours": duration_hours,
             }
             self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
             self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
@@ -792,7 +881,7 @@ class App:
         print(f"[ppp] completed: {lat:.8f}, {lon:.8f}, {height:.3f} "
               f"(tiers used: {tiers_used})", flush=True)
         self.save_position_backup(lat, lon, height, "ppp",
-                                   duration_hours=self.ppp_duration_hours, num_raw_files=num_raw_files)
+                                   duration_hours=duration_hours, num_raw_files=num_raw_files)
         self.mqtt.publish(f"{BASE}/ppp_status/state", "done", retain=True)
         self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
         self.mqtt.publish(f"{BASE}/manual_lat/state", f"{lat:.8f}", retain=True)
@@ -847,7 +936,7 @@ class App:
         self._compute_and_finish_ppp(
             state["dates"], state["obs_path"], state["nav_path"], state["sp3_paths"],
             state["clk_paths"], state["atx_path"], state["workdir"], state["num_raw_files"],
-            state["tiers_used"])
+            state["tiers_used"], state["duration_hours"])
 
     def run_ppp_refinement(self, refinement_id, dates, obs_path, nav_path, workdir):
         """Runs after a campaign completes using a less precise IGS
