@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.19
+
+- **Critical fix**: `PPP_CONF_TEMPLATE` used `pos1-frequency=l1+l2` and
+  `pos1-ionoopt=iflc`, neither of which are valid RTKLIB option values -
+  `rnx2rtkp` rejected both with "invalid option value" and silently fell
+  back to defaults that produced an all-`Q=0` `result.pos` (no fix at
+  all), so every PPP campaign that got as far as actually running
+  `rnx2rtkp` still failed with `No valid epoch found in result.pos`.
+  Found from a real campaign on a user's Home Assistant instance that
+  finally got IGS products after ~26 hourly retries (see 0.2.17), only to
+  fail at this last step. Verified against RTKLIB's real enum
+  definitions (`src/options.c`'s `FRQOPT`/`IONOPT`): the correct values
+  are `l1+2` (dual-frequency) and `dual-freq` (ionosphere-free
+  combination via dual-frequency observations) - confirmed with a real
+  `rnx2rtkp` run producing no more "invalid option value" warnings.
+
 ## 0.2.18
 
 - Feature: once a PPP campaign completes using "rapid" (RAP) IGS

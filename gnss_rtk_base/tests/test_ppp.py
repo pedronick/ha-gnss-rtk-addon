@@ -7,6 +7,23 @@ import pytest
 import ppp
 
 
+def test_ppp_conf_template_uses_valid_rtklib_option_values():
+    """Regression: pos1-frequency=l1+l2 and pos1-ionoopt=iflc aren't
+    valid RTKLIB option values - a real rnx2rtkp run rejected them with
+    "invalid option value" and silently fell back to a default that
+    produced an all-Q=0 result.pos (no fix at all), found from a real PPP
+    campaign on a user's Home Assistant instance. Verified against
+    RTKLIB's actual enum strings in src/options.c (FRQOPT/IONOPT): the
+    correct values are l1+2 (dual-frequency) and dual-freq
+    (ionosphere-free combination via dual-frequency observations) -
+    confirmed with a real rnx2rtkp run producing no more "invalid option
+    value" warnings."""
+    assert "pos1-frequency     =l1+2" in ppp.PPP_CONF_TEMPLATE
+    assert "pos1-ionoopt       =dual-freq" in ppp.PPP_CONF_TEMPLATE
+    assert "l1+l2" not in ppp.PPP_CONF_TEMPLATE
+    assert "=iflc" not in ppp.PPP_CONF_TEMPLATE
+
+
 def test_gps_week_dow_epoch_and_known_reference():
     # By definition, the GPS epoch itself is week 0, day 0.
     assert ppp.gps_week_dow(ppp.GPS_EPOCH) == (0, 0)

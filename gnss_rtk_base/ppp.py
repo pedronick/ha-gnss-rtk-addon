@@ -35,10 +35,10 @@ ANTEX_MIRRORS = [
 
 PPP_CONF_TEMPLATE = """\
 pos1-posmode       =ppp-static
-pos1-frequency     =l1+l2
+pos1-frequency     =l1+2
 pos1-soltype       =forward
 pos1-elmask        =10
-pos1-ionoopt       =iflc
+pos1-ionoopt       =dual-freq
 pos1-tropopt       =est-ztd
 pos1-dynamics      =off
 pos1-tidecorr      =off
