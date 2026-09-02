@@ -429,6 +429,22 @@ startup, if the backup exists, it's automatically restored into the
 sent back to the receiver — that remains a deliberate action via
 `button.apply_manual_position`, if you decide to reapply it).
 
+#### Permanent archive of the raw logs behind a PPP position
+
+Whenever a PPP campaign (or `reprocess_existing_logs`/`retry_ppp_computation`,
+see above) successfully computes and applies a position, the exact raw
+log files that went into that computation are copied to
+`/data/ppp_source_logs/<timestamp>/` - a directory `cleanup_raw_logs()`
+never touches, so **these copies are never deleted automatically**,
+regardless of `raw_log_retention_hours`. The continuous log in
+`/data/raw_logs` still rotates out normally; this is a separate,
+permanent copy of specifically the data that determined an actual
+applied position, kept for provenance/reprocessing even long after the
+original raw log would otherwise be gone. One archive per successful
+computation - old ones aren't replaced or pruned by the add-on, so if
+you run many campaigns over time and want to reclaim the space, that's a
+manual cleanup (e.g. via the Samba share or Terminal/SSH add-on).
+
 Note: the PPP campaign requires outbound internet access from the
 container to download the IGS products (SP3/CLK/ANTEX) from BKG
 (Bundesamt für Kartographie und Geodäsie, Germany - public, no

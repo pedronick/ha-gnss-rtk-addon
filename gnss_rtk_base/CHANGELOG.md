@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.22
+
+- Feature: the exact raw log files behind a successfully applied PPP
+  position (from a normal campaign, `reprocess_existing_logs`, or
+  `retry_ppp_computation`) are now permanently copied to
+  `/data/ppp_source_logs/<timestamp>/` - a directory `cleanup_raw_logs()`
+  never touches, so these copies are **never deleted automatically**,
+  unlike the continuous log in `/data/raw_logs` which still rotates out
+  per `raw_log_retention_hours`. Requested after a real campaign's
+  position was computed from data that would otherwise eventually rotate
+  out of the normal retention window with no permanent record of what
+  produced the currently-applied position. One archive per successful
+  computation, never replaced or pruned automatically.
+
 ## 0.2.21
 
 - Feature: new `button.reprocess_existing_logs` runs the PPP-static

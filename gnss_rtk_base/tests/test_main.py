@@ -700,6 +700,7 @@ def test_run_ppp_campaign_keeps_retry_state_when_rnx2rtkp_fails(monkeypatch, tmp
 
 
 def test_retry_ppp_computation_succeeds_with_preserved_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
     workdir = tmp_path / "ppp_campaign_workdir"
     workdir.mkdir()
@@ -709,7 +710,8 @@ def test_retry_ppp_computation_succeeds_with_preserved_state(monkeypatch, tmp_pa
     app.ppp_retry_state = {
         "dates": [dt.date(2024, 1, 15)], "obs_path": "obs", "nav_path": "nav",
         "sp3_paths": ["sp3"], "clk_paths": ["clk"], "atx_path": "atx",
-        "workdir": workdir, "num_raw_files": 3, "tiers_used": {dt.date(2024, 1, 15): "FIN"},
+        "workdir": workdir, "raw_files": ["fake1.rtcm3", "fake2.rtcm3", "fake3.rtcm3"],
+        "tiers_used": {dt.date(2024, 1, 15): "FIN"},
         "duration_hours": 6,
     }
     monkeypatch.setattr(ppp, "run_rnx2rtkp", lambda *a, **k: "pos")
@@ -814,6 +816,58 @@ def test_reprocess_existing_logs_supersedes_pending_retry_state(monkeypatch, tmp
     assert app.ppp_retry_state is None
     states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
     assert states[-1] == "error"
+
+
+def test_archive_ppp_source_logs_copies_files_to_permanent_location(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    raw2 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011501.rtcm3"
+    raw1.write_bytes(b"raw data 1")
+    raw2.write_bytes(b"raw data 2")
+
+    app = _bare_app()
+    app._archive_ppp_source_logs([raw1, raw2], "2024-01-15T12:00:00+00:00")
+
+    archive_dir = Path(main.RAW_LOG_DIR).parent / "ppp_source_logs" / "2024-01-15T12-00-00+00-00"
+    assert (archive_dir / raw1.name).read_bytes() == b"raw data 1"
+    assert (archive_dir / raw2.name).read_bytes() == b"raw data 2"
+
+
+def test_archive_ppp_source_logs_survives_missing_files(monkeypatch, tmp_path, capsys):
+    """A delayed retry_ppp_computation() can run long enough after the
+    original failure that cleanup_raw_logs() has since rotated some of
+    the original raw files out - archiving must not crash over that,
+    just archive whatever's still there and warn about the rest."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    app = _bare_app()
+    app._archive_ppp_source_logs([tmp_path / "gone.rtcm3"], "2024-01-15T12:00:00+00:00")
+    assert "could not archive" in capsys.readouterr().out
+
+
+def test_archive_ppp_source_logs_survives_cleanup_raw_logs(monkeypatch, tmp_path):
+    """The whole point: unlike RAW_LOG_DIR, the archive lives in a
+    completely separate directory that cleanup_raw_logs() never globs,
+    so it's untouched by raw_log_retention_hours-based deletion - the
+    source data behind an applied position should never be silently
+    deleted by routine log rotation."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    raw1.write_bytes(b"raw data 1")
+
+    app = _bare_app(raw_log_retention_hours=0)  # would delete anything in RAW_LOG_DIR immediately
+    app._archive_ppp_source_logs([raw1], "2024-01-15T12:00:00+00:00")
+
+    old = time.time() - 1000
+    os.utime(raw1, (old, old))  # make it look stale to cleanup_raw_logs()
+    t = threading.Thread(target=app.cleanup_raw_logs, daemon=True)
+    t.start()
+    time.sleep(0.3)
+
+    assert not raw1.exists(), "sanity check: cleanup_raw_logs() did remove the original"
+    archive_dir = Path(main.RAW_LOG_DIR).parent / "ppp_source_logs" / "2024-01-15T12-00-00+00-00"
+    assert (archive_dir / raw1.name).exists(), "the archived copy must be untouched by cleanup"
 
 
 def test_run_ppp_campaign_errors_once_retention_window_closes(monkeypatch, tmp_path):

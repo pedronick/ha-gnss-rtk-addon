@@ -487,10 +487,13 @@ class App:
         """Saves to /data the position just fixed, with provenance
         (method, timestamp, parameters), and publishes the same content
         as an MQTT entity (state = timestamp, attributes = the rest of
-        the data)."""
+        the data). Returns that data (in particular computed_at), used by
+        _compute_and_finish_ppp to name the permanent raw-log archive
+        (see _archive_ppp_source_logs) for the same computation."""
         data = position_backup.save(lat, lon, height, method, self.receiver_type, **extra)
         self.mqtt.publish(f"{BASE}/position_backup/state", data["computed_at"], retain=True)
         self.mqtt.publish(f"{BASE}/position_backup/attributes", json.dumps(data), retain=True)
+        return data
 
     def _relay_line_reader(self):
         """Subscribes as a client of the internal relay fed by str2str
@@ -710,7 +713,7 @@ class App:
         sp3_paths, clk_paths, atx_path, tiers_used = result
 
         self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
-                                      workdir, len(raw_files), tiers_used, self.ppp_duration_hours)
+                                      workdir, raw_files, tiers_used, self.ppp_duration_hours)
 
     def reprocess_existing_logs(self):
         """Reprocesses whatever raw log files are still on disk (governed
@@ -762,7 +765,7 @@ class App:
         # len(raw_files) approximates the covered duration in hours (files
         # rotate hourly) - only used for the position backup's metadata.
         self._compute_and_finish_ppp(dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
-                                      workdir, len(raw_files), tiers_used, len(raw_files))
+                                      workdir, raw_files, tiers_used, len(raw_files))
 
     def _fresh_ppp_workdir(self):
         """Derived from RAW_LOG_DIR (not hardcoded "/data") so that
@@ -838,19 +841,20 @@ class App:
                 self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
 
     def _compute_and_finish_ppp(self, dates, obs_path, nav_path, sp3_paths, clk_paths, atx_path,
-                                 workdir, num_raw_files, tiers_used, duration_hours):
+                                 workdir, raw_files, tiers_used, duration_hours):
         """The final, purely computational step (rnx2rtkp + parsing the
         result), shared by run_ppp_campaign (first attempt),
         reprocess_existing_logs, and retry_ppp_computation (retries only
         this step, reusing the same already-downloaded IGS products). On
-        success: applies/persists the position and, if a less precise
-        tier (RAP) was used, schedules background refinement (see
-        run_ppp_refinement). On failure: keeps everything needed to retry
-        via button.retry_ppp_computation instead of discarding
-        already-downloaded products and forcing a full re-log +
-        re-download - found worth doing from a real campaign that finally
-        got IGS products after ~26 hourly retries, only to fail at this
-        last step over a config bug.
+        success: applies/persists the position, permanently archives the
+        exact raw log files behind it (see _archive_ppp_source_logs) and,
+        if a less precise tier (RAP) was used, schedules background
+        refinement (see run_ppp_refinement). On failure: keeps everything
+        needed to retry via button.retry_ppp_computation instead of
+        discarding already-downloaded products and forcing a full re-log
+        + re-download - found worth doing from a real campaign that
+        finally got IGS products after ~26 hourly retries, only to fail
+        at this last step over a config bug.
 
         duration_hours is only informational (position_backup metadata):
         the configured campaign duration for a normal run, or an estimate
@@ -868,7 +872,7 @@ class App:
             self.ppp_retry_state = {
                 "dates": dates, "obs_path": obs_path, "nav_path": nav_path,
                 "sp3_paths": sp3_paths, "clk_paths": clk_paths, "atx_path": atx_path,
-                "workdir": workdir, "num_raw_files": num_raw_files, "tiers_used": tiers_used,
+                "workdir": workdir, "raw_files": raw_files, "tiers_used": tiers_used,
                 "duration_hours": duration_hours,
             }
             self.mqtt.publish(f"{BASE}/ppp_status/state", "error", retain=True)
@@ -880,8 +884,9 @@ class App:
         self.driver.set_fixed_base(self.rtcm_port, self.baud, lat, lon, height)
         print(f"[ppp] completed: {lat:.8f}, {lon:.8f}, {height:.3f} "
               f"(tiers used: {tiers_used})", flush=True)
-        self.save_position_backup(lat, lon, height, "ppp",
-                                   duration_hours=duration_hours, num_raw_files=num_raw_files)
+        backup_data = self.save_position_backup(lat, lon, height, "ppp",
+                                                 duration_hours=duration_hours, num_raw_files=len(raw_files))
+        self._archive_ppp_source_logs(raw_files, backup_data["computed_at"])
         self.mqtt.publish(f"{BASE}/ppp_status/state", "done", retain=True)
         self.mqtt.publish(f"{BASE}/ppp_remaining/state", 0, retain=True)
         self.mqtt.publish(f"{BASE}/manual_lat/state", f"{lat:.8f}", retain=True)
@@ -918,6 +923,34 @@ class App:
             daemon=True,
         ).start()
 
+    def _archive_ppp_source_logs(self, raw_files, computed_at):
+        """Permanently preserves a copy of the exact raw log files that
+        determined the currently-applied PPP position, in a directory
+        RAW_LOG_DIR's parent/ppp_source_logs/<computed_at>/ - unlike the
+        continuous raw log in RAW_LOG_DIR, this copy is never touched by
+        cleanup_raw_logs()'s raw_log_retention_hours-based deletion, and
+        is never pruned automatically by this add-on: the source data
+        behind an actual applied position is worth more than routine log
+        retention. One archive per successful computation (campaign,
+        reprocess, or computation retry) - old ones aren't replaced or
+        removed, so disk usage grows slowly over time with repeated use;
+        size accordingly (raw logs are small, on the order of ~1MB/hour
+        of logging, see the README)."""
+        archive_dir = Path(RAW_LOG_DIR).parent / "ppp_source_logs" / computed_at.replace(":", "-")
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archived = 0
+        for raw_file in raw_files:
+            try:
+                shutil.copy2(raw_file, archive_dir / Path(raw_file).name)
+                archived += 1
+            except OSError as e:
+                # e.g. cleanup_raw_logs() already rotated this file out
+                # before a delayed retry_ppp_computation() ran - archive
+                # whatever's still there rather than failing outright.
+                print(f"[ppp] warning: could not archive {raw_file}: {e}", flush=True)
+        print(f"[ppp] archived {archived}/{len(raw_files)} raw log file(s) "
+              f"used for this position to {archive_dir}", flush=True)
+
     def retry_ppp_computation(self):
         """Retries just the final computation step (see
         _compute_and_finish_ppp) using the same already-downloaded IGS
@@ -935,7 +968,7 @@ class App:
         self.mqtt.publish(f"{BASE}/ppp_status/state", "processing", retain=True)
         self._compute_and_finish_ppp(
             state["dates"], state["obs_path"], state["nav_path"], state["sp3_paths"],
-            state["clk_paths"], state["atx_path"], state["workdir"], state["num_raw_files"],
+            state["clk_paths"], state["atx_path"], state["workdir"], state["raw_files"],
             state["tiers_used"], state["duration_hours"])
 
     def run_ppp_refinement(self, refinement_id, dates, obs_path, nav_path, workdir):
