@@ -712,6 +712,8 @@ def test_run_ppp_campaign_discards_no_fix_window_and_tries_next_oldest(monkeypat
     monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     Path(main.RAW_LOG_DIR).mkdir(parents=True)
     monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
+    failed_archive_dir = tmp_path / "share_ppp_failed_windows"
+    monkeypatch.setattr(main, "FAILED_PPP_WINDOW_ARCHIVE_DIR", str(failed_archive_dir))
 
     now = time.time()
     bad_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011400.rtcm3"
@@ -755,6 +757,12 @@ def test_run_ppp_campaign_discards_no_fix_window_and_tries_next_oldest(monkeypat
     assert states[-1] == "done", "must automatically continue to the next window and succeed"
     assert app.manual_lat == 45.0
     assert not app.ppp_running
+
+    archived_dirs = list(failed_archive_dir.iterdir())
+    assert len(archived_dirs) == 1, "the discarded window must be archived for inspection, not just deleted"
+    archived_files = list(archived_dirs[0].iterdir())
+    assert any(f.name == bad_file.name and f.read_bytes() == b"bad data" for f in archived_files), \
+        "must preserve a copy of the exact raw file behind the no-fix outcome"
 
 
 def test_retry_ppp_computation_succeeds_with_preserved_state(monkeypatch, tmp_path):
@@ -806,6 +814,7 @@ def test_retry_ppp_computation_resets_running_flag_and_discards_files_on_no_fix(
     thinking a PPP operation is still running forever."""
     monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    monkeypatch.setattr(main, "FAILED_PPP_WINDOW_ARCHIVE_DIR", str(tmp_path / "share_ppp_failed_windows"))
     workdir = tmp_path / "ppp_campaign_workdir"
     workdir.mkdir()
     raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
@@ -1021,6 +1030,48 @@ def test_archive_ppp_source_logs_survives_missing_files(monkeypatch, tmp_path, c
     app = _bare_app()
     app._archive_ppp_source_logs([tmp_path / "gone.rtcm3"], "2024-01-15T12:00:00+00:00")
     assert "could not archive" in capsys.readouterr().out
+
+
+def test_archive_failed_ppp_window_copies_raw_files_and_result_pos(monkeypatch, tmp_path):
+    """Unlike _archive_ppp_source_logs (a successful position's raw logs,
+    kept forever under /data), this preserves the evidence behind a
+    "no_fix" outcome under /share instead - /data isn't reachable via the
+    Samba share add-on by default, so the files would otherwise be
+    undiscardable-yet-unreachable for a user trying to diagnose why a
+    window produced no fix."""
+    archive_root = tmp_path / "share_ppp_failed_windows"
+    monkeypatch.setattr(main, "FAILED_PPP_WINDOW_ARCHIVE_DIR", str(archive_root))
+    workdir = tmp_path / "ppp_campaign_workdir"
+    workdir.mkdir()
+    (workdir / "result.pos").write_text("% header only, no valid epoch\n")
+    (workdir / "ppp.conf").write_text("pos1-posmode =ppp-static\n")
+    raw1 = tmp_path / "gnssbase_2024011500.rtcm3"
+    raw1.write_bytes(b"raw data")
+    obs_path, nav_path = workdir / "campaign.obs", workdir / "campaign.nav"
+    obs_path.write_text("obs")
+    nav_path.write_text("nav")
+
+    app = _bare_app()
+    app._archive_failed_ppp_window([str(raw1)], str(obs_path), str(nav_path), workdir)
+
+    archived_dirs = list(archive_root.iterdir())
+    assert len(archived_dirs) == 1
+    archived_names = {f.name for f in archived_dirs[0].iterdir()}
+    assert archived_names == {"gnssbase_2024011500.rtcm3", "campaign.obs", "campaign.nav",
+                               "result.pos", "ppp.conf"}
+
+
+def test_archive_failed_ppp_window_survives_missing_files(monkeypatch, tmp_path, capsys):
+    archive_root = tmp_path / "share_ppp_failed_windows"
+    monkeypatch.setattr(main, "FAILED_PPP_WINDOW_ARCHIVE_DIR", str(archive_root))
+    workdir = tmp_path / "ppp_campaign_workdir"  # doesn't exist: no result.pos/ppp.conf to archive
+
+    app = _bare_app()
+    app._archive_failed_ppp_window([str(tmp_path / "gone.rtcm3")], "gone.obs", "gone.nav", workdir)
+
+    archived_dirs = list(archive_root.iterdir())
+    assert len(archived_dirs) == 1
+    assert list(archived_dirs[0].iterdir()) == [], "nothing existed to archive, but must not crash"
 
 
 def test_archive_ppp_source_logs_survives_cleanup_raw_logs(monkeypatch, tmp_path):

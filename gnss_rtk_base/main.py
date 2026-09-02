@@ -33,6 +33,11 @@ from webui import start_webserver
 
 OPTIONS_PATH = "/data/options.json"
 RAW_LOG_DIR = "/data/raw_logs"
+# Under /share (mapped via config.yaml's "map: share:rw"), not /data:
+# /data isn't reachable via the Samba share add-on by default, while
+# /share is - so a "no_fix" outcome's files are downloadable for
+# inspection without needing SSH/docker exec.
+FAILED_PPP_WINDOW_ARCHIVE_DIR = "/share/ppp_failed_windows"
 BASE = "gnssbase"
 WEBUI_PORT = 8099
 SERIAL_RETRY_INTERVAL_S = 5
@@ -941,6 +946,7 @@ class App:
         except ValueError as e:
             print("[ppp] error:", e, flush=True)
             print("[ppp] discarding this window's raw log files - trying different data instead", flush=True)
+            self._archive_failed_ppp_window(raw_files, obs_path, nav_path, workdir)
             for raw_file in raw_files:
                 try:
                     os.remove(raw_file)
@@ -1035,6 +1041,42 @@ class App:
                 # before a delayed retry_ppp_computation() ran - archive
                 # whatever's still there rather than failing outright.
                 print(f"[ppp] warning: could not archive {raw_file}: {e}", flush=True)
+
+    def _archive_failed_ppp_window(self, raw_files, obs_path, nav_path, workdir):
+        """Preserves the exact raw log files and RINEX conversion behind a
+        "no_fix" outcome (see _compute_and_finish_ppp) in
+        FAILED_PPP_WINDOW_ARCHIVE_DIR/<timestamp>/, before they're
+        discarded from the active buffer/workdir - otherwise there would
+        be nothing left to inspect for what would otherwise be a silent,
+        unexplained failure. Found needing this after a real "No valid
+        epoch found" outcome left no trace behind to diagnose from (the
+        raw files get deleted and the workdir gets wiped/reused by the
+        very next window in the same run_ppp_campaign() loop iteration).
+        Also copies result.pos/ppp.conf if present, since rnx2rtkp ran to
+        completion (that's what distinguishes "no_fix" from the other,
+        config/products failure case) - they may hint at why no epoch
+        converged. Never pruned automatically, same reasoning as
+        _archive_ppp_source_logs: expected to be rare."""
+        archive_dir = (Path(FAILED_PPP_WINDOW_ARCHIVE_DIR) /
+                       dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"[ppp] warning: could not create failed-window archive dir: {e}", flush=True)
+            return
+        candidates = [*raw_files, obs_path, nav_path, workdir / "result.pos", workdir / "ppp.conf"]
+        archived = 0
+        for src in candidates:
+            src = Path(src)
+            if not src.exists():
+                continue
+            try:
+                shutil.copy2(src, archive_dir / src.name)
+                archived += 1
+            except OSError as e:
+                print(f"[ppp] warning: could not archive {src}: {e}", flush=True)
+        print(f"[ppp] archived {archived} file(s) from the failed window to {archive_dir} "
+              "for inspection (e.g. via the Samba \"share\" folder)", flush=True)
         print(f"[ppp] archived {archived}/{len(raw_files)} raw log file(s) "
               f"used for this position to {archive_dir}", flush=True)
 

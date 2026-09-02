@@ -1,13 +1,28 @@
 # Changelog
 
+## 0.2.26
+
+- Added: a "no_fix" outcome (see 0.2.25 below) now archives the exact raw
+  log files plus the converted RINEX files (and `result.pos`/`ppp.conf`)
+  to `/share/ppp_failed_windows/<timestamp>/` before discarding them from
+  the buffer - previously they were just deleted outright, leaving no
+  trace to diagnose *why* a window produced no fix at all (the workdir
+  gets wiped/reused by the very next window in the same run). Lands
+  under `/share` (now mapped via `config.yaml`'s `map: share:rw`), not
+  `/data`: the add-on's own `/data` isn't reachable via the Samba share
+  add-on's default shares, while `/share` is - so these files are
+  downloadable by just opening the existing "share" network folder, no
+  SSH/`docker exec` needed.
+
 ## 0.2.25
 
 - Fixed: `run_ppp_campaign()` used to leave the campaign stuck in `error`
   if `rnx2rtkp` ran to completion but produced no usable fix at all for
-  the auto-picked window (bad source data for that specific window, e.g.
-  missing ephemeris in the raw log covering it - not a config or
-  products problem) - found from a real campaign where this happened on
-  the oldest buffered window. Retrying the same data (as
+  the auto-picked window (bad source data for that specific window - not
+  a config or products problem, those fail differently) - found from a
+  real campaign where this happened on the oldest buffered window; the
+  root cause behind *why* that window had no fix wasn't conclusively
+  identified. Retrying the same data (as
   `button.retry_ppp_computation` does for other failures) would just
   fail identically, so this case is now handled differently: the
   offending raw log files are permanently discarded and the next-oldest

@@ -393,18 +393,30 @@ soon as a new campaign starts, since starting one already discards the
 old campaign's working files.
 
 If instead `rnx2rtkp` runs to completion but produces **no usable fix at
-all** for that window (found from a real campaign: bad source data for
-that specific window, e.g. missing ephemeris in the raw log covering it
-- not a config or products problem), retrying the exact same data would
-just fail identically. `button.start_ppp_campaign` handles this
-differently from the case above: it permanently discards that window's
-raw log files and automatically tries the next-oldest buffered window
-instead, without any user action needed - `sensor.ppp_campaign` briefly
-shows `error` for the discarded window before moving straight back to
+all** for that window (found from a real campaign - the root cause
+wasn't conclusively identified, but it's bad source data for that
+specific window rather than a config or products problem, since those
+fail differently, see above), retrying the exact same data would just
+fail identically. `button.start_ppp_campaign` handles this differently
+from the case above: it permanently discards that window's raw log
+files and automatically tries the next-oldest buffered window instead,
+without any user action needed - `sensor.ppp_campaign` briefly shows
+`error` for the discarded window before moving straight back to
 `processing` with the new one, bounded by the buffer eventually running
 out (falls back to a plain fresh campaign at that point).
 `button.retry_ppp_computation` has nothing to offer here, since there's
 no fixable state behind a "no fix" outcome to retry.
+
+Before discarding, the exact raw log files plus the converted RINEX
+files (and `result.pos`/`ppp.conf`, since rnx2rtkp did run) are copied to
+`/share/ppp_failed_windows/<timestamp>/` for later inspection - otherwise
+a "no fix" outcome would leave no trace behind to diagnose from at all
+(the workdir gets wiped/reused by the very next window in the same run).
+This lands under `/share`, not `/data`: the add-on's own `/data` isn't
+reachable via the Samba share add-on's default shares, while `/share` is
+- so these files are downloadable by just opening the existing "share"
+network folder, no SSH/`docker exec` needed. Never pruned automatically
+(same reasoning as the permanent archive below): expected to be rare.
 
 #### `button.start_ppp_campaign` reuses buffered data automatically
 
