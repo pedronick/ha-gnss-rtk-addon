@@ -49,6 +49,26 @@ fix status, satellites in use, estimated accuracy, HDOP/PDOP. No extra
 configuration required: it appears automatically in the sidebar after
 installation ("RTK Base").
 
+The same page also has an on-demand **cycle-slip heatmap**: enter a
+number of hours and press "Generate" to overlay a translucent red blob
+at every cycle slip RTKLIB detected in that window of the raw log buffer
+(instant - broadcast ephemeris only, no IGS products needed). Frequent
+slips clustered in one part of the sky usually point to a real
+obstruction or multipath source there (a building, a tree, a nearby
+reflective surface) - this is how a real installation's poorly-placed
+antenna was found, by noticing that a "no_fix" PPP campaign's affected
+satellites all shared a similar azimuth range; this feature automates
+that same correlation.
+
+The same page also mirrors **every command and state published via MQTT
+Discovery** (survey-in, manual position, PPP campaign, raw log buffer,
+diagnostics) as a set of cards below the sky plot - the add-on can be
+fully operated from this page alone, without Home Assistant's own
+dashboard set up. It's the same underlying commands (same
+`on_message()` dispatch) and the same states (read from the MQTT client's
+own "shadow" of the last payload published to each topic, see
+`mqtt_shadow.py`), not a second, independent implementation.
+
 ## Multi-receiver support
 
 The rest of the pipeline (RTKLIB `str2str`, NMEA parsing for

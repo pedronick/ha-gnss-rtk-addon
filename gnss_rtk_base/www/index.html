@@ -19,6 +19,21 @@
   .legend span::before { content:"●"; margin-right:6px; }
   .legend .used::before { color:#34a853; }
   .legend .visible::before { color:#5f6368; }
+  .heatmap-controls { display:flex; align-items:center; gap:8px; justify-content:center; margin-top:16px; font-size:13px; color:#9aa0a6; }
+  .heatmap-controls input { width:60px; background:#1a1d24; color:#e8eaed; border:1px solid #333844; border-radius:6px; padding:4px 6px; }
+  .heatmap-controls button { background:#3c4043; color:#e8eaed; border:none; border-radius:6px; padding:6px 14px; cursor:pointer; font-size:13px; }
+  .heatmap-controls button:disabled { opacity:0.5; cursor:default; }
+  #heatmapStatus { min-height: 1.2em; }
+  #controls { display:flex; flex-wrap:wrap; gap:16px; margin-top:24px; justify-content:center; }
+  .card { background:#1a1d24; border-radius:12px; padding:14px 18px; min-width:260px; flex:1 1 260px; max-width:360px; }
+  .card h2 { font-size:14px; margin:0 0 10px; color:#e8eaed; }
+  .card .row { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:13px; color:#9aa0a6; padding:4px 0; border-bottom:1px solid #262a33; }
+  .card .row:last-child { border-bottom:none; }
+  .card .row .value { color:#e8eaed; text-align:right; word-break:break-word; }
+  .card .number-row input { width:110px; background:#111318; color:#e8eaed; border:1px solid #333844; border-radius:6px; padding:4px 6px; text-align:right; }
+  .card .number-row button, .card .buttons button { background:#3c4043; color:#e8eaed; border:none; border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px; }
+  .card .number-row button:hover, .card .buttons button:hover { background:#4a4e52; }
+  .card .buttons { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -34,6 +49,15 @@
     <span class="used">Used in fix</span>
     <span class="visible">Visible, not used</span>
   </div>
+  <div class="heatmap-controls">
+    <label for="heatmapHours">Sky error heatmap, last</label>
+    <input type="number" id="heatmapHours" value="6" min="0.1" max="720" step="0.5">
+    <label for="heatmapHours">hours</label>
+    <button id="heatmapBtn">Generate</button>
+  </div>
+  <div class="heatmap-controls" id="heatmapStatus"></div>
+
+  <div id="controls"></div>
 
 <script>
 const canvas = document.getElementById('sky');
@@ -44,6 +68,25 @@ function polarToXY(elevation, azimuth) {
   const r = R * (1 - elevation / 90);
   const rad = (azimuth - 90) * Math.PI / 180; // 0° azimuth (North) at the top
   return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+}
+
+let heatmapEvents = [];  // populated on demand by generateHeatmap(), persists across the 1s live refresh
+
+function drawHeatmap(events) {
+  // Overlapping translucent blobs at each cycle-slip's sky position: they
+  // naturally accumulate opacity via canvas alpha blending where slips
+  // cluster, giving a heatmap effect without any server-side gridding.
+  events.forEach(ev => {
+    if (ev.elevation == null || ev.azimuth == null) return;
+    const [x, y] = polarToXY(ev.elevation, ev.azimuth);
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, 16);
+    grad.addColorStop(0, 'rgba(217,48,37,0.35)');
+    grad.addColorStop(1, 'rgba(217,48,37,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, 16, 0, 2 * Math.PI);
+    ctx.fill();
+  });
 }
 
 function drawSkyplot(sats) {
@@ -71,6 +114,8 @@ function drawSkyplot(sats) {
   ctx.fillText('S', cx - 4, cy + R + 14);
   ctx.fillText('E', cx + R + 6, cy + 4);
   ctx.fillText('W', cx - R - 14, cy + 4);
+
+  drawHeatmap(heatmapEvents);
 
   sats.forEach(sat => {
     if (sat.elevation == null || sat.azimuth == null) return;
@@ -110,6 +155,237 @@ async function refresh() {
     console.error('Refresh error:', e);
   }
 }
+
+async function generateHeatmap() {
+  const btn = document.getElementById('heatmapBtn');
+  const status = document.getElementById('heatmapStatus');
+  const hours = parseFloat(document.getElementById('heatmapHours').value) || 6;
+  btn.disabled = true;
+  status.textContent = 'Analyzing…';
+  try {
+    const res = await fetch('api/sky_heatmap?hours=' + encodeURIComponent(hours));
+    const data = await res.json();
+    if (data.error) {
+      heatmapEvents = [];
+      status.textContent = 'Error: ' + data.error;
+    } else {
+      heatmapEvents = data.slip_events || [];
+      status.textContent = heatmapEvents.length + ' slip event(s) over ' + data.epochs +
+        ' epoch(s) in the last ' + data.hours + 'h (' + data.raw_files + ' raw log file(s))';
+    }
+  } catch (e) {
+    heatmapEvents = [];
+    status.textContent = 'Error: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('heatmapBtn').addEventListener('click', generateHeatmap);
+
+// --- Controls & status: mirrors every command/state also published via
+// MQTT Discovery, so the add-on can be operated from this page alone
+// (e.g. before Home Assistant's own dashboard is set up). Built once
+// (see buildControls) and only updated in place on each poll (see
+// updateControls) - rebuilding the DOM every 2s would drop focus/cursor
+// position out of any number input the user is actively editing.
+
+const CARDS = [
+  {
+    title: 'Survey-In (quick average)',
+    fields: [
+      { key: 'survey_in/state', label: 'Status' },
+      { key: 'survey_in_remaining/state', label: 'Time remaining (s)' },
+    ],
+    buttons: [
+      { label: 'Start', topic: 'survey_in/set' },
+      { label: 'Cancel', topic: 'survey_in_cancel/set' },
+    ],
+  },
+  {
+    title: 'Manual position',
+    numbers: [
+      { key: 'manual_lat/state', topic: 'manual_lat/set', label: 'Latitude', step: '0.0000001' },
+      { key: 'manual_lon/state', topic: 'manual_lon/set', label: 'Longitude', step: '0.0000001' },
+      { key: 'manual_height/state', topic: 'manual_height/set', label: 'Height (m)', step: '0.001' },
+    ],
+    buttons: [
+      { label: 'Apply to receiver', topic: 'apply_manual_position/set' },
+    ],
+    fields: [
+      { key: 'position_backup/state', label: 'Last computed position (any method)' },
+    ],
+  },
+  {
+    title: 'PPP campaign',
+    fields: [
+      { key: 'ppp_status/state', label: 'Status' },
+      { key: 'ppp_remaining/state', label: 'Time remaining (s)' },
+      { key: 'ppp_refinement_status/state', label: 'Refinement (final products)' },
+    ],
+    numbers: [
+      { key: 'ppp_duration_hours/state', topic: 'ppp_duration_hours/set', label: 'Duration (h)', step: '1' },
+    ],
+    buttons: [
+      { label: 'Start (reuses buffer)', topic: 'ppp_start/set' },
+      { label: 'Cancel', topic: 'ppp_cancel/set' },
+      { label: 'Retry computation', topic: 'ppp_retry_computation/set' },
+    ],
+  },
+  {
+    title: 'Raw log buffer',
+    fields: [
+      { key: 'raw_log_buffer_hours/state', label: 'Buffered (h)' },
+    ],
+    buttons: [
+      { label: 'Clear buffer', topic: 'clear_raw_log_buffer/set' },
+    ],
+  },
+  {
+    title: 'Diagnostics',
+    fields: [
+      { key: 'device_connected/state', label: 'Device connected' },
+      { key: 'last_seen/state', label: 'Last data received' },
+      { key: 'config_error/state', label: 'Configuration error' },
+      { key: 'rtcm_bps/state', label: 'RTCM input bitrate (bps)' },
+      { key: 'str2str_diagnostics/state', label: 'str2str diagnostics' },
+      { key: 'caster_clients/state', label: 'Connected rovers (local caster)' },
+    ],
+  },
+];
+
+async function sendCommand(topic, payload) {
+  await fetch('api/command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, payload: (payload == null ? '' : payload) }),
+  });
+}
+
+function buildControls() {
+  const container = document.getElementById('controls');
+  CARDS.forEach(card => {
+    const el = document.createElement('div');
+    el.className = 'card';
+    const h2 = document.createElement('h2');
+    h2.textContent = card.title;
+    el.appendChild(h2);
+
+    (card.fields || []).forEach(f => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `<span>${f.label}</span><span class="value" data-field="${f.key}">—</span>`;
+      el.appendChild(row);
+    });
+
+    (card.numbers || []).forEach(n => {
+      const row = document.createElement('div');
+      row.className = 'row number-row';
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = n.step;
+      input.dataset.field = n.key;
+      const btn = document.createElement('button');
+      btn.textContent = 'Set';
+      btn.addEventListener('click', () => sendCommand(n.topic, input.value));
+      const label = document.createElement('span');
+      label.textContent = n.label;
+      row.appendChild(label);
+      const controlsWrap = document.createElement('span');
+      controlsWrap.style.display = 'flex';
+      controlsWrap.style.gap = '6px';
+      controlsWrap.appendChild(input);
+      controlsWrap.appendChild(btn);
+      row.appendChild(controlsWrap);
+      el.appendChild(row);
+    });
+
+    if (card.buttons && card.buttons.length) {
+      const row = document.createElement('div');
+      row.className = 'buttons';
+      card.buttons.forEach(b => {
+        const btn = document.createElement('button');
+        btn.textContent = b.label;
+        btn.addEventListener('click', () => sendCommand(b.topic, ''));
+        row.appendChild(btn);
+      });
+      el.appendChild(row);
+    }
+
+    if (card.title === 'Diagnostics') {
+      const outputsList = document.createElement('div');
+      outputsList.id = 'outputStatusList';
+      el.appendChild(outputsList);
+    }
+
+    container.appendChild(el);
+  });
+}
+
+let lastOutputKeys = '';
+
+function updateControls(mqttState) {
+  document.querySelectorAll('#controls [data-field]').forEach(elm => {
+    const key = elm.dataset.field;
+    if (key === 'position_backup/state') {
+      // Also folds in position_backup/attributes (a JSON string with
+      // lat/lon/height/method/computed_at) instead of showing just the
+      // bare timestamp - the whole point of this backup is the
+      // provenance, not only the value.
+      const raw = mqttState['position_backup/attributes'];
+      try {
+        const d = JSON.parse(raw);
+        elm.textContent = `${d.method} @ ${d.computed_at} — ${d.lat.toFixed(7)}, ${d.lon.toFixed(7)}, ${d.height.toFixed(3)}m`;
+      } catch (e) {
+        elm.textContent = (mqttState[key] == null ? '—' : mqttState[key]);
+      }
+      return;
+    }
+    const value = mqttState[key];
+    if (elm.tagName === 'INPUT') {
+      if (document.activeElement !== elm) elm.value = (value == null ? '' : value);
+    } else {
+      elm.textContent = (value === undefined || value === null || value === '') ? '—' : value;
+    }
+  });
+
+  // Output statuses (output_0_status, output_1_status, ...): the count
+  // depends on how many casters/outputs are configured, so it's
+  // discovered from whatever keys are actually present instead of a
+  // fixed list.
+  const outputKeys = Object.keys(mqttState)
+    .filter(k => /^output_\d+_status\/state$/.test(k))
+    .sort();
+  const signature = outputKeys.join(',');
+  const list = document.getElementById('outputStatusList');
+  if (list && signature !== lastOutputKeys) {
+    lastOutputKeys = signature;
+    list.innerHTML = '';
+    outputKeys.forEach((key, i) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `<span>Output ${i + 1} status</span><span class="value" data-field="${key}">—</span>`;
+      list.appendChild(row);
+    });
+  }
+  outputKeys.forEach(key => {
+    const elm = list && list.querySelector(`[data-field="${CSS.escape(key)}"]`);
+    if (elm) elm.textContent = (mqttState[key] == null ? '—' : mqttState[key]);
+  });
+}
+
+async function refreshMqttState() {
+  try {
+    const res = await fetch('api/mqtt_state');
+    updateControls(await res.json());
+  } catch (e) {
+    console.error('mqtt_state refresh error:', e);
+  }
+}
+
+buildControls();
+refreshMqttState();
+setInterval(refreshMqttState, 2000);
 
 refresh();
 setInterval(refresh, 1000);

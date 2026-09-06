@@ -4,6 +4,8 @@ import struct
 import threading
 import time
 
+import pytest
+
 import caster
 
 
@@ -36,6 +38,36 @@ def _start_caster(mountpoint="TEST", user="", password="", max_clients=None, lim
     ).start()
     time.sleep(0.2)
     return broadcaster, relay_port, caster_port, fake_str2str_srv
+
+
+def test_remove_client_unsubscribes_and_closes_the_socket():
+    """Regression: a real file-descriptor-exhaustion crash was traced to
+    _relay_line_reader() (main.py) closing only its own end of a
+    socketpair, relying on broadcast()'s own lazy dead-socket cleanup -
+    which never runs unless something is actually being broadcast, so it
+    never noticed (and never freed) the other end every time the reader
+    resubscribed. remove_client() is the explicit alternative used there
+    now."""
+    broadcaster = caster.Broadcaster()
+    pub_sock, priv_sock = socket.socketpair()
+    broadcaster.add_client(pub_sock)
+    assert broadcaster.num_clients() == 1
+
+    broadcaster.remove_client(pub_sock)
+
+    assert broadcaster.num_clients() == 0
+    with pytest.raises(OSError):
+        pub_sock.send(b"x")  # closed by remove_client()
+    priv_sock.close()
+
+
+def test_remove_client_is_a_noop_for_a_socket_never_added():
+    broadcaster = caster.Broadcaster()
+    pub_sock, priv_sock = socket.socketpair()
+    broadcaster.remove_client(pub_sock)  # must not raise
+    assert broadcaster.num_clients() == 0
+    pub_sock.close()
+    priv_sock.close()
 
 
 def test_wrong_mountpoint_returns_sourcetable():

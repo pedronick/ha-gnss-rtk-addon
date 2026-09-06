@@ -49,6 +49,26 @@ class Broadcaster:
         with self._lock:
             self._clients.append(sock)
 
+    def remove_client(self, sock):
+        """Explicit unsubscribe, for a client that closes its own end on
+        its own schedule (e.g. _relay_line_reader() in main.py) rather
+        than only ever being written to until that fails - broadcast()'s
+        own lazy dead-socket cleanup only runs on a failed sendall(), so
+        it would never notice (and never free the other end of the
+        socketpair) if nothing is being broadcast at the time. Found from
+        a real file-descriptor-exhaustion crash: a period of frequent,
+        rapid relay reconnects (str2str's own tcpsvr connection kept
+        resetting) meant close() ran often while broadcast() - which
+        needs incoming data to even run - didn't, so dead sockets piled
+        up unnoticed until socket.socketpair() itself started failing."""
+        with self._lock:
+            if sock in self._clients:
+                self._clients.remove(sock)
+        try:
+            sock.close()
+        except OSError:
+            pass
+
     def num_clients(self):
         with self._lock:
             return len(self._clients)

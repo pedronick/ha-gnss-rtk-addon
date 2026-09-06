@@ -18,6 +18,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import paho.mqtt.client as mqtt
 import serial
@@ -25,6 +26,7 @@ import serial
 import caster
 import drivers
 import mqtt_discovery as disc
+import mqtt_shadow
 import nmea
 import ppp
 import position_backup
@@ -97,6 +99,7 @@ class App:
         self.str2str_proc = None
         self.survey_running = False
         self.ppp_running = False
+        self.sky_heatmap_running = False
         self.survey_cancel_event = None
         self.ppp_cancel_event = None
         # Bumped each time a new PPP campaign starts: invalidates (and
@@ -116,7 +119,10 @@ class App:
         Path(RAW_LOG_DIR).mkdir(parents=True, exist_ok=True)
         self.state = SharedState()
 
-        self.mqtt = mqtt.Client()
+        # Wrapped so the skyplot web page can mirror every state/command
+        # already published via MQTT Discovery (see web_state_snapshot/
+        # handle_web_command) without a second connection to the broker.
+        self.mqtt = mqtt_shadow.ShadowMqttClient(mqtt.Client())
         user = os.environ.get("MQTT_USER")
         password = os.environ.get("MQTT_PASSWORD")
         if user:
@@ -529,6 +535,29 @@ class App:
         elif msg.topic.endswith("clear_raw_log_buffer/set"):
             self.clear_raw_log_buffer()
 
+    def web_state_snapshot(self):
+        """Every state currently published via MQTT Discovery, for the
+        skyplot web page's own controls/status section (see webui.py's
+        /api/mqtt_state) - the exact same values Home Assistant sees,
+        read from self.mqtt's shadow dict (see mqtt_shadow.py) instead of
+        a second connection to the broker. Keys have the BASE topic
+        prefix stripped (e.g. "survey_in/state", "manual_lat/state")."""
+        prefix = f"{BASE}/"
+        return {topic[len(prefix):]: payload
+                for topic, payload in self.mqtt.shadow.items()
+                if topic.startswith(prefix)}
+
+    def handle_web_command(self, topic_suffix, payload):
+        """Lets the skyplot web page's controls trigger the exact same
+        commands as an MQTT button/number (survey-in, PPP campaign,
+        manual position, ...) by reusing on_message()'s own dispatch -
+        one source of truth for what each command does, instead of a
+        second implementation that could drift from it. topic_suffix is
+        the same string an MQTT command topic would end with (e.g.
+        "ppp_start/set", "manual_lat/set")."""
+        msg = SimpleNamespace(topic=f"{BASE}/{topic_suffix}", payload=str(payload).encode())
+        self.on_message(self.mqtt, None, msg)
+
     def cancel_survey_in(self):
         if self.survey_running and self.survey_cancel_event:
             print("[survey-in] cancellation request received", flush=True)
@@ -561,7 +590,15 @@ class App:
         if the underlying connection is gone. Used instead of a direct
         serial.Serial() whenever rtcm_port == nmea_port, since str2str is
         already the sole reader of that physical port (see
-        needs_internal_relay())."""
+        needs_internal_relay()).
+
+        close() unsubscribes via broadcaster.remove_client(), not just a
+        bare priv_sock.close() - found from a real crash where leaving
+        pub_sock registered (relying on broadcast()'s own lazy cleanup,
+        which only runs on a failed write, i.e. only once more data
+        actually needs broadcasting) let dead sockets accumulate every
+        time _monitor_nmea_via_relay()'s loop resubscribed, eventually
+        exhausting the process's file descriptors."""
         pub_sock, priv_sock = socket.socketpair()
         self.broadcaster.add_client(pub_sock)
         priv_sock.settimeout(RELAY_READ_TIMEOUT_S)
@@ -584,6 +621,7 @@ class App:
             return line.decode(errors="replace")
 
         def close():
+            self.broadcaster.remove_client(pub_sock)
             try:
                 priv_sock.close()
             except OSError:
@@ -853,6 +891,48 @@ class App:
         obs_path, nav_path = ppp.convbin(str(raw_concat), str(workdir))
         dates = ppp.parse_obs_dates(obs_path)
         return obs_path, nav_path, dates, raw_files
+
+    def compute_sky_heatmap(self, hours):
+        """On-demand (triggered by a button on the skyplot web page, not
+        scheduled): converts the last `hours` of raw log buffer to RINEX
+        and runs a quick single-point (broadcast ephemeris only, no IGS
+        products needed) rnx2rtkp pass just to get RTKLIB's own
+        per-satellite cycle-slip bookkeeping (see ppp.parse_sky_stat) for
+        the page's heatmap overlay. Added after a real installation's
+        antenna turned out to be poorly placed, found by manually
+        correlating frequent slips with the azimuth/elevation of the
+        affected satellites during a "no_fix" PPP investigation.
+
+        Deliberately synchronous - the caller (the webui HTTP handler)
+        blocks until this returns - since single-point mode is fast
+        enough (no network, no precise products) for even a full
+        raw_log_retention_hours window to complete within a normal
+        request/response. Uses its own workdir (sky_heatmap_workdir, not
+        ppp_campaign_workdir), so it can safely run alongside an
+        unrelated PPP campaign. Returns a dict with either "error" or the
+        result of ppp.parse_sky_stat() plus "hours"/"raw_files"."""
+        if self.sky_heatmap_running:
+            return {"error": "a sky heatmap analysis is already running"}
+        self.sky_heatmap_running = True
+        workdir = Path(RAW_LOG_DIR).parent / "sky_heatmap_workdir"
+        try:
+            shutil.rmtree(workdir, ignore_errors=True)
+            workdir.mkdir(parents=True)
+            end_ts = time.time()
+            start_ts = end_ts - hours * 3600
+            try:
+                obs_path, nav_path, _dates, raw_files = self._convert_raw_window_to_rinex(
+                    start_ts, end_ts, workdir)
+                stat_path = ppp.run_sky_analysis(obs_path, nav_path, workdir)
+                result = ppp.parse_sky_stat(stat_path)
+            except Exception as e:
+                return {"error": str(e)}
+            result["hours"] = hours
+            result["raw_files"] = len(raw_files)
+            return result
+        finally:
+            self.sky_heatmap_running = False
+            shutil.rmtree(workdir, ignore_errors=True)
 
     def _wait_for_products(self, dates, workdir, wait_deadline):
         """Polls ppp.fetch_precise_products every
@@ -1302,9 +1382,17 @@ class App:
         # and the receiver may take a while to become available, and while
         # they do we still want the skyplot panel reachable (showing "not
         # connected") instead of Ingress returning a 502 with nothing
-        # listening yet. Neither thread touches self.mqtt.
+        # listening yet. web_state_snapshot()/handle_web_command() do touch
+        # self.mqtt (shadow dict / publish), but harmlessly so before
+        # connect(): the shadow dict starts out empty regardless of
+        # connection state, and a publish attempt on a not-yet-connected
+        # paho client just fails quietly (no exception), same as pressing
+        # a button too early would on the MQTT side too.
         threading.Thread(target=self.cleanup_raw_logs, daemon=True).start()
-        threading.Thread(target=start_webserver, args=(self.state, nmea.fix_label, WEBUI_PORT), daemon=True).start()
+        threading.Thread(target=start_webserver,
+                         args=(self.state, nmea.fix_label, WEBUI_PORT, self.compute_sky_heatmap,
+                               self.web_state_snapshot, self.handle_web_command),
+                         daemon=True).start()
 
         mqtt_host = os.environ.get("MQTT_HOST", "localhost")
         mqtt_port = int(os.environ.get("MQTT_PORT", 1883))

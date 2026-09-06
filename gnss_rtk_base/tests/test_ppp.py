@@ -220,3 +220,59 @@ def test_try_download_returns_false_if_all_mirrors_fail(monkeypatch, tmp_path):
     ok = ppp.try_download(["https://a/x", "https://b/x"], dest)
     assert ok is False
     assert not dest.exists()
+
+
+def test_parse_sky_stat_extracts_only_slip_flagged_events(tmp_path):
+    """Regression basis: a real installation's poorly-placed antenna was
+    diagnosed by correlating RTKLIB's own per-epoch cycle-slip flag (not
+    the cumulative slipc counter, which would double-count) with each
+    satellite's azimuth/elevation from the same $SAT line - this is the
+    parsing half of that same technique, reused for the skyplot page's
+    on-demand heatmap."""
+    stat = tmp_path / "sky.pos.stat"
+    stat.write_text(
+        "$POS,2434,206119.000,5,4456368.6,859858.1,4466423.1,0,0,0\n"
+        # slip=1 (12th field after $SAT): must be included
+        "$SAT,2434,206119.000,G11,1,246.0,35.0,-1.2,0.0,1,40.0,0,1,3,2,5,0\n"
+        # same epoch, slip=0: must be excluded, but still counts the epoch once
+        "$SAT,2434,206119.000,G09,1,10.0,68.0,0.1,0.0,1,45.0,0,0,4,0,0,0\n"
+        # a second epoch, a second slip at a different satellite/position
+        "$SAT,2434,206120.000,G19,1,250.0,18.0,2.1,0.0,1,30.0,0,1,1,3,4,1\n"
+    )
+    result = ppp.parse_sky_stat(stat)
+    assert result["epochs"] == 2, "distinct (week, tow) pairs, not $SAT line count"
+    assert result["slip_events"] == [
+        {"sat": "G11", "azimuth": 246.0, "elevation": 35.0},
+        {"sat": "G19", "azimuth": 250.0, "elevation": 18.0},
+    ]
+
+
+def test_parse_sky_stat_returns_empty_when_no_slips(tmp_path):
+    stat = tmp_path / "sky.pos.stat"
+    stat.write_text("$SAT,2434,206119.000,G09,1,10.0,68.0,0.1,0.0,1,45.0,0,0,4,0,0,0\n")
+    result = ppp.parse_sky_stat(stat)
+    assert result == {"slip_events": [], "epochs": 1}
+
+
+def test_run_sky_analysis_invokes_rnx2rtkp_with_no_precise_products(monkeypatch, tmp_path):
+    """Regression: a first version of this used pos1-posmode=single, which
+    seemed like the obvious lightweight choice but turned out to never
+    detect any cycle slip at all - RTKLIB only runs slip detection from
+    the PPP/RTK code path, never from plain single-point positioning.
+    ppp-static (with dynamics=on and out-outsingle=on, see
+    SKY_ANALYSIS_CONF's own comment) is required to actually get slip
+    data - verified against a real installation's raw log that it still
+    works with no SP3/CLK/ANTEX arguments at all, just obs+nav."""
+    calls = []
+    monkeypatch.setattr(ppp.subprocess, "run", lambda cmd, check: calls.append(cmd))
+
+    stat_path = ppp.run_sky_analysis("obs.o", "nav.n", tmp_path)
+
+    assert stat_path == tmp_path / "sky.pos.stat"
+    assert calls[0][:2] == ["rnx2rtkp", "-k"]
+    assert "-y" in calls[0] and calls[0][calls[0].index("-y") + 1] == "2"
+    assert calls[0][-2:] == ["obs.o", "nav.n"], "no SP3/CLK/ANTEX arguments needed"
+    conf_text = (tmp_path / "sky.conf").read_text()
+    assert "pos1-posmode       =ppp-static" in conf_text
+    assert "pos1-dynamics      =on" in conf_text
+    assert "out-outsingle      =on" in conf_text

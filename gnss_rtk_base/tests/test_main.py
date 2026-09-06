@@ -19,9 +19,11 @@ from state import SharedState
 class FakeMqtt:
     def __init__(self):
         self.published = []
+        self.shadow = {}  # mirrors mqtt_shadow.ShadowMqttClient, see test_web_state_snapshot_*
 
     def publish(self, topic, payload, retain=False):
         self.published.append((topic, payload))
+        self.shadow[topic] = payload
 
     def username_pw_set(self, *a, **k):
         pass
@@ -44,6 +46,7 @@ def _bare_app(**overrides):
         state=SharedState(),
         survey_running=False,
         ppp_running=False,
+        sky_heatmap_running=False,
         survey_cancel_event=None,
         ppp_cancel_event=None,
         ppp_refinement_id=0,
@@ -352,12 +355,23 @@ def test_monitor_nmea_recovers_after_disconnect_same_port_via_relay(monkeypatch)
     assert connected and connected[-1] == "ON"
 
     # No more broadcasts: simulates str2str going quiet (e.g. receiver
-    # disconnected) past the (patched) silence timeout.
+    # disconnected) past the (patched) silence timeout - several times
+    # over, to also exercise repeated resubscription.
     time.sleep(1.0)
 
     connected = [p for t, p in app.mqtt.published if t.endswith("device_connected/state")]
     assert connected[-1] == "OFF"
     assert mon.is_alive(), "the monitor must not terminate: it must keep retrying"
+    # Regression: close() used to only close its own end of the
+    # socketpair, never telling the broadcaster - which only ever
+    # noticed (and freed) a dead client on its own via a failed
+    # broadcast(), something that never happens while str2str stays
+    # quiet. Each of the silence-timeout cycles above used to leak one
+    # socketpair; a real installation hit this often enough (str2str's
+    # own connection resetting rapidly) to exhaust its file descriptors
+    # and crash outright.
+    assert app.broadcaster.num_clients() <= 1, \
+        "repeated resubscription after a silence timeout must not leak clients"
 
 
 def test_save_position_backup_writes_file_and_publishes_mqtt(tmp_path, monkeypatch):
@@ -1005,6 +1019,58 @@ def test_run_ppp_campaign_is_noop_while_already_running():
     assert app.mqtt.published == []
 
 
+def test_compute_sky_heatmap_returns_slip_events_for_the_requested_window(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    raw1.write_bytes(b"data")
+
+    collected_windows = []
+
+    def fake_collect(raw_log_dir, start_ts, end_ts):
+        collected_windows.append((start_ts, end_ts))
+        return [str(raw1)]
+
+    monkeypatch.setattr(ppp, "collect_raw_files", fake_collect)
+    monkeypatch.setattr(ppp, "concat_raw_files", lambda *a, **k: None)
+    monkeypatch.setattr(ppp, "convbin", lambda *a, **k: ("obs", "nav"))
+    monkeypatch.setattr(ppp, "parse_obs_dates", lambda *a, **k: [dt.date(2024, 1, 15)])
+    monkeypatch.setattr(ppp, "run_sky_analysis", lambda *a, **k: "sky.pos.stat")
+    monkeypatch.setattr(ppp, "parse_sky_stat", lambda *a, **k: {
+        "slip_events": [{"sat": "G11", "azimuth": 246.0, "elevation": 35.0}], "epochs": 42,
+    })
+
+    app = _bare_app()
+    now = time.time()
+    result = app.compute_sky_heatmap(6)
+
+    assert result["slip_events"] == [{"sat": "G11", "azimuth": 246.0, "elevation": 35.0}]
+    assert result["epochs"] == 42
+    assert result["hours"] == 6
+    assert result["raw_files"] == 1
+    start_ts, end_ts = collected_windows[0]
+    assert end_ts == pytest.approx(now, abs=2)
+    assert (end_ts - start_ts) / 3600 == pytest.approx(6, rel=0.01)
+    assert not app.sky_heatmap_running, "must reset the flag once done"
+
+
+def test_compute_sky_heatmap_is_busy_while_already_running():
+    app = _bare_app(sky_heatmap_running=True)
+    result = app.compute_sky_heatmap(6)
+    assert "error" in result
+    assert app.sky_heatmap_running, "must not clear a running flag it didn't set"
+
+
+def test_compute_sky_heatmap_reports_error_when_buffer_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))  # doesn't exist: empty buffer
+
+    app = _bare_app()
+    result = app.compute_sky_heatmap(6)
+
+    assert "error" in result
+    assert not app.sky_heatmap_running
+
+
 def test_archive_ppp_source_logs_copies_files_to_permanent_location(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     Path(main.RAW_LOG_DIR).mkdir(parents=True)
@@ -1126,3 +1192,42 @@ def test_cancel_ppp_campaign_is_noop_when_not_running():
     app = _bare_app(ppp_running=False, ppp_cancel_event=None)
     app.cancel_ppp_campaign()
     assert app.mqtt.published == []
+
+
+def test_web_state_snapshot_strips_base_prefix_and_ignores_other_topics():
+    """The skyplot web page's controls/status section reads this instead
+    of connecting to MQTT itself - same values Home Assistant sees, from
+    self.mqtt's own shadow dict (see mqtt_shadow.py)."""
+    app = _bare_app()
+    app.mqtt.publish(f"{main.BASE}/survey_in/state", "idle", retain=True)
+    app.mqtt.publish(f"{main.BASE}/ppp_status/state", "processing", retain=True)
+    app.mqtt.publish("some/unrelated/topic", "should not appear", retain=True)
+
+    snapshot = app.web_state_snapshot()
+
+    assert snapshot["survey_in/state"] == "idle"
+    assert snapshot["ppp_status/state"] == "processing"
+    assert "some/unrelated/topic" not in snapshot
+
+
+def test_handle_web_command_reuses_on_message_dispatch(monkeypatch, tmp_path):
+    """The page's buttons must trigger the exact same behavior an MQTT
+    button/number would (same dispatch, see on_message), not a second,
+    possibly-diverging implementation - button.start_ppp_campaign are
+    literally the same code path here."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    started = []
+    app = _bare_app()
+    monkeypatch.setattr(app, "run_ppp_campaign", lambda: started.append(True))
+
+    app.handle_web_command("ppp_start/set", "")
+    time.sleep(0.1)  # on_message starts run_ppp_campaign on its own thread
+
+    assert started == [True]
+
+
+def test_handle_web_command_sets_a_number_value_like_mqtt_would():
+    app = _bare_app()
+    app.handle_web_command("manual_lat/set", "45.1234567")
+    assert app.manual_lat == 45.1234567
+    assert app.mqtt.shadow[f"{main.BASE}/manual_lat/state"] == "45.1234567"

@@ -236,3 +236,89 @@ def parse_last_position(pos_path):
     if last is None:
         raise ValueError(f"No valid epoch found in {pos_path}")
     return last
+
+
+# Deliberately ppp-static, not single: RTKLIB only runs cycle-slip
+# detection (detslp_ll(), driven purely by each observation's LLI flag,
+# regardless of precise products) from the PPP/RTK code path, never from
+# plain "single" (code-only) positioning - confirmed the hard way, a
+# first version of this used "single" and always got zero slip events
+# back, even on data known (from a real installation) to have frequent
+# slips. l1+2/dual-freq (not l1-only) so slips on either frequency are
+# caught. dynamics=on is likewise required for a different reason: with
+# it off, RTKLIB skips PPP entirely (and with it, slip detection) for any
+# epoch whose preliminary code-only bootstrap fails its own internal
+# check - which is common on real, noisy data. And out-outsingle=on is
+# required because RTKLIB's -y 2 stat file writer only emits $SAT lines
+# (which carry azimuth/elevation and the per-epoch slip flag) when the
+# epoch's overall solution status isn't SOLQ_NONE - which it would
+# otherwise be forced to for any epoch where the PPP filter itself
+# doesn't converge (exactly the epochs most likely to show real slips).
+# No precise products (SP3/CLK/ANTEX) needed at all - broadcast ephemeris
+# is enough for RTKLIB to compute az/el and run slip detection, verified
+# against a real installation's raw log with and without real IGS
+# products giving identical slip results - so this can run instantly on
+# any raw log window on demand, unlike an actual PPP campaign.
+SKY_ANALYSIS_CONF = """\
+pos1-posmode       =ppp-static
+pos1-frequency     =l1+2
+pos1-elmask        =10
+pos1-ionoopt       =dual-freq
+pos1-dynamics      =on
+pos2-armode        =off
+out-solformat      =llh
+out-outhead        =on
+out-outopt         =on
+out-outsingle      =on
+out-timesys        =gpst
+out-height         =ellipsoidal
+"""
+
+
+def run_sky_analysis(obs_path, nav_path, workdir):
+    """Runs rnx2rtkp with -y 2 (per-satellite solution status, see
+    parse_sky_stat and SKY_ANALYSIS_CONF) and returns the resulting .stat
+    file path. No precise products needed - broadcast ephemeris (from
+    nav_path) is enough."""
+    conf_path = workdir / "sky.conf"
+    conf_path.write_text(SKY_ANALYSIS_CONF)
+    out_pos = workdir / "sky.pos"
+    subprocess.run(["rnx2rtkp", "-k", str(conf_path), "-y", "2", "-o", str(out_pos),
+                    str(obs_path), str(nav_path)], check=True)
+    return workdir / "sky.pos.stat"
+
+
+def parse_sky_stat(stat_path):
+    """Parses rnx2rtkp's -y 2 stat file into cycle-slip events with their
+    sky position, for a skyplot heatmap: each $SAT line already carries
+    azimuth/elevation (RTKLIB computes them from the broadcast ephemeris
+    and the estimated/approximate receiver position) and a per-epoch
+    "slip" flag (column 13, 1 if a cycle slip was detected for that
+    satellite/frequency at that epoch - see RTKLIB's src/rtkpos.c $SAT
+    format comment: week,tow,sat,frq,az,el,resp,resc,vsat,snr,fix,slip,
+    lock,outc,slipc,rejc). Only the instantaneous flag is used, not the
+    cumulative slipc counter, so each event is counted exactly once.
+
+    Returns {"slip_events": [{"sat": "G11", "azimuth": .., "elevation": ..}, ...],
+    "epochs": <number of distinct epochs seen>}."""
+    events = []
+    epochs = set()
+    with open(stat_path, "r", errors="ignore") as f:
+        for line in f:
+            if not line.startswith("$SAT,"):
+                continue
+            parts = line.strip().split(",")
+            if len(parts) < 13:
+                continue
+            epochs.add((parts[1], parts[2]))
+            if parts[12] != "1":  # slip flag
+                continue
+            try:
+                events.append({
+                    "sat": parts[3],
+                    "azimuth": float(parts[5]),
+                    "elevation": float(parts[6]),
+                })
+            except ValueError:
+                continue
+    return {"slip_events": events, "epochs": len(epochs)}

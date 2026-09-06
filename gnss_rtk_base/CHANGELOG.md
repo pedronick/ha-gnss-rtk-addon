@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.2.27
+
+- Fixed a real file-descriptor-exhaustion crash: `_relay_line_reader()`
+  (used to read NMEA off the internal relay when `rtcm_port ==
+  nmea_port`) closed only its own end of its socketpair, relying on
+  `Broadcaster.broadcast()`'s own lazy dead-socket cleanup to eventually
+  notice and free the other end - which only happens on a failed write,
+  i.e. only once more data actually needs broadcasting. A period of
+  frequent, rapid relay reconnects (str2str's own internal relay
+  connection kept resetting every ~2s) meant this loop resubscribed
+  often while nothing was being broadcast to trigger that cleanup, so
+  dead sockets piled up unnoticed for hours until `socket.socketpair()`
+  itself started failing with "No file descriptors available",
+  crashing the add-on outright (and, since its Supervisor watchdog is
+  off, staying down until manually restarted). New
+  `Broadcaster.remove_client()` gives `_relay_line_reader()`'s `close()`
+  an explicit way to unsubscribe instead.
+- Feature: the skyplot web page now mirrors every command and state also
+  published via MQTT Discovery - survey-in, manual position, PPP
+  campaign (including duration/retry/refinement status), raw log buffer,
+  and diagnostics (device connected, last seen, configuration error,
+  RTCM bitrate, str2str diagnostics, connected rovers, per-output
+  status, last computed position with full provenance). The page can
+  now be fully operated on its own, without needing Home Assistant's own
+  dashboard set up.
+  - New `mqtt_shadow.ShadowMqttClient` wraps the paho client and remembers
+    the last payload published to every topic, so the page can read the
+    exact same states Home Assistant sees without a second MQTT
+    connection from the browser (which would need a broker WebSocket
+    listener and exposing MQTT credentials to the page).
+  - New `App.handle_web_command()` reuses `on_message()`'s own dispatch
+    for the page's buttons/number fields, so there's a single
+    implementation of what each command does, not a second one that
+    could drift from the MQTT-triggered path.
+  - New `/api/mqtt_state` (read) and `/api/command` (POST, not GET - a
+    GET could fire from prefetching/link previews, not something you
+    want accidentally starting a PPP campaign) endpoints in webui.py.
+- Feature: the skyplot web page now also has an on-demand cycle-slip heatmap.
+  Enter a number of hours and press "Generate": the add-on converts that
+  window of the raw log buffer to RINEX and runs a quick rnx2rtkp pass
+  (broadcast ephemeris only, no IGS products, so it's instant) just to
+  read RTKLIB's own per-satellite azimuth/elevation/cycle-slip
+  bookkeeping, and overlays a translucent red blob at each detected slip
+  on the existing sky plot. Frequent slips clustered in one part of the
+  sky usually mean an obstruction or multipath source there (a building,
+  a tree, a nearby reflective surface) - this is exactly how a real
+  installation's poorly-placed antenna was diagnosed (see the "no_fix"
+  investigation below), by manually correlating slip counts with
+  satellite azimuth/elevation; this feature does the same correlation
+  automatically instead.
+  - Getting reliable slip data required two non-obvious RTKLIB findings:
+    plain "single" (code-only) positioning never runs cycle-slip
+    detection at all (that logic only exists in the PPP/RTK code path),
+    and RTKLIB's own -y 2 stat file only writes per-satellite lines for
+    epochs whose overall solution status isn't SOLQ_NONE - which most
+    epochs would otherwise be, on exactly the noisy data this feature
+    needs to see. `pos1-dynamics=on` and `out-outsingle=on` (see
+    ppp.SKY_ANALYSIS_CONF) work around both.
+
 ## 0.2.26
 
 - Added: a "no_fix" outcome (see 0.2.25 below) now archives the exact raw
