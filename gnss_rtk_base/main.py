@@ -910,7 +910,18 @@ class App:
         request/response. Uses its own workdir (sky_heatmap_workdir, not
         ppp_campaign_workdir), so it can safely run alongside an
         unrelated PPP campaign. Returns a dict with either "error" or the
-        result of ppp.parse_sky_stat() plus "hours"/"raw_files"."""
+        result of ppp.parse_sky_stat() plus "hours" (the window actually
+        used, see below) and "raw_files".
+
+        `hours` is a maximum look-back, not a requirement: if the buffer
+        holds less than that (e.g. right after startup, or after
+        clear_raw_log_buffer()), this uses everything available instead
+        of erroring out - found from a real report that asking for more
+        hours than were actually buffered yet failed outright instead of
+        just showing what there was. The result's own "hours" reflects
+        the window actually used, not the request, so the page can be
+        honest about it (e.g. "2.3h" when 6 were asked for but only 2.3
+        were buffered)."""
         if self.sky_heatmap_running:
             return {"error": "a sky heatmap analysis is already running"}
         self.sky_heatmap_running = True
@@ -918,8 +929,11 @@ class App:
         try:
             shutil.rmtree(workdir, ignore_errors=True)
             workdir.mkdir(parents=True)
+            oldest_ts = self._oldest_raw_log_ts()
+            if oldest_ts is None:
+                return {"error": "no raw log data available yet"}
             end_ts = time.time()
-            start_ts = end_ts - hours * 3600
+            start_ts = max(end_ts - hours * 3600, oldest_ts)
             try:
                 obs_path, nav_path, _dates, raw_files = self._convert_raw_window_to_rinex(
                     start_ts, end_ts, workdir)
@@ -927,7 +941,7 @@ class App:
                 result = ppp.parse_sky_stat(stat_path)
             except Exception as e:
                 return {"error": str(e)}
-            result["hours"] = hours
+            result["hours"] = round((end_ts - start_ts) / 3600, 1)
             result["raw_files"] = len(raw_files)
             return result
         finally:

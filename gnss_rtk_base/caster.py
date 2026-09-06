@@ -112,6 +112,17 @@ def run_relay_receiver(broadcaster):
         except OSError:
             time.sleep(RELAY_RETRY_INTERVAL_S)
             continue
+        # create_connection()'s timeout applies to the returned socket
+        # itself, not just the connect attempt - left as-is, any pause
+        # in the actual data stream longer than RELAY_RETRY_INTERVAL_S
+        # (entirely normal jitter, even at a steady 1Hz NMEA/RTCM rate)
+        # raises socket.timeout on the next recv(), indistinguishable
+        # from a real dead connection below. Found from a real
+        # installation reconnecting every ~2s indefinitely: back to
+        # blocking, since a genuinely dead connection is still detected
+        # correctly (recv() returns b"" on a clean close, raises OSError
+        # on a reset) without needing a read timeout at all here.
+        conn.settimeout(None)
         print("[caster] connected to str2str's internal relay", flush=True)
         try:
             while True:

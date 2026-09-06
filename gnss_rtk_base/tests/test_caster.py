@@ -150,6 +150,51 @@ def test_relay_receiver_reconnects_after_abrupt_disconnect(monkeypatch):
     rover_priv.close()
 
 
+def test_relay_receiver_survives_a_quiet_period_longer_than_retry_interval(monkeypatch):
+    """Regression: socket.create_connection(addr, timeout=X) leaves that
+    timeout active on the *returned* socket, not just for the connect
+    attempt itself. Left as-is, any pause in the actual data stream
+    longer than RELAY_RETRY_INTERVAL_S - entirely normal jitter, even at
+    a steady 1Hz NMEA/RTCM rate - raised socket.timeout on the next
+    recv(), indistinguishable from a real dead connection, and made a
+    real installation tear down and reopen this connection roughly every
+    2 seconds indefinitely. A single accept() on the fake str2str side
+    (checked at the end) proves the connection survived the quiet period
+    instead of being needlessly reconnected."""
+    monkeypatch.setattr(caster, "RELAY_RETRY_INTERVAL_S", 0.1)
+    relay_port = _free_port()
+    caster.INTERNAL_RELAY_PORT = relay_port
+    broadcaster = caster.Broadcaster()
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", relay_port))
+    srv.listen(1)
+    srv.settimeout(5)
+    threading.Thread(target=caster.run_relay_receiver, args=(broadcaster,), daemon=True).start()
+
+    upstream, _ = srv.accept()
+    rover_pub, rover_priv = socket.socketpair()
+    broadcaster.add_client(rover_pub)
+
+    # Several times RELAY_RETRY_INTERVAL_S, with no data sent at all -
+    # must not be mistaken for a dead connection.
+    time.sleep(0.5)
+    payload = b"\xd3\x00\x13FAKE_RTCM_PAYLOAD_1234"
+    upstream.sendall(payload)
+    time.sleep(0.2)
+    rover_priv.settimeout(2)
+    assert rover_priv.recv(4096) == payload
+
+    srv.settimeout(0.3)
+    with pytest.raises(socket.timeout):
+        srv.accept()  # a reconnect would show up here as a second client
+
+    upstream.close()
+    rover_pub.close()
+    rover_priv.close()
+
+
 def test_no_auth_required_when_credentials_empty():
     _, _, caster_port, _ = _start_caster(mountpoint="GNSSBASE", user="", password="")
     s = socket.create_connection(("127.0.0.1", caster_port), timeout=2)

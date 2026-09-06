@@ -1019,18 +1019,7 @@ def test_run_ppp_campaign_is_noop_while_already_running():
     assert app.mqtt.published == []
 
 
-def test_compute_sky_heatmap_returns_slip_events_for_the_requested_window(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
-    Path(main.RAW_LOG_DIR).mkdir(parents=True)
-    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
-    raw1.write_bytes(b"data")
-
-    collected_windows = []
-
-    def fake_collect(raw_log_dir, start_ts, end_ts):
-        collected_windows.append((start_ts, end_ts))
-        return [str(raw1)]
-
+def _stub_sky_analysis_pipeline(monkeypatch, fake_collect):
     monkeypatch.setattr(ppp, "collect_raw_files", fake_collect)
     monkeypatch.setattr(ppp, "concat_raw_files", lambda *a, **k: None)
     monkeypatch.setattr(ppp, "convbin", lambda *a, **k: ("obs", "nav"))
@@ -1040,8 +1029,24 @@ def test_compute_sky_heatmap_returns_slip_events_for_the_requested_window(monkey
         "slip_events": [{"sat": "G11", "azimuth": 246.0, "elevation": 35.0}], "epochs": 42,
     })
 
-    app = _bare_app()
+
+def test_compute_sky_heatmap_returns_slip_events_for_the_requested_window(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
     now = time.time()
+    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    raw1.write_bytes(b"data")
+    os.utime(raw1, (now - 40 * 3600, now - 40 * 3600))  # buffer deeper than the requested 6h
+
+    collected_windows = []
+
+    def fake_collect(raw_log_dir, start_ts, end_ts):
+        collected_windows.append((start_ts, end_ts))
+        return [str(raw1)]
+
+    _stub_sky_analysis_pipeline(monkeypatch, fake_collect)
+
+    app = _bare_app()
     result = app.compute_sky_heatmap(6)
 
     assert result["slip_events"] == [{"sat": "G11", "azimuth": 246.0, "elevation": 35.0}]
@@ -1052,6 +1057,40 @@ def test_compute_sky_heatmap_returns_slip_events_for_the_requested_window(monkey
     assert end_ts == pytest.approx(now, abs=2)
     assert (end_ts - start_ts) / 3600 == pytest.approx(6, rel=0.01)
     assert not app.sky_heatmap_running, "must reset the flag once done"
+
+
+def test_compute_sky_heatmap_uses_whatever_is_buffered_when_shallower_than_requested(monkeypatch, tmp_path):
+    """Regression: asking for more hours than are actually buffered yet
+    (e.g. right after startup) used to fail outright with "no data for
+    the given window" instead of just showing what's there - `hours` is
+    meant as a maximum look-back, not a requirement, the same way
+    run_ppp_campaign() already prefers whatever's buffered over erroring
+    out or waiting needlessly."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
+    Path(main.RAW_LOG_DIR).mkdir(parents=True)
+    now = time.time()
+    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
+    raw1.write_bytes(b"data")
+    os.utime(raw1, (now - 2 * 3600, now - 2 * 3600))  # only 2h buffered
+
+    collected_windows = []
+
+    def fake_collect(raw_log_dir, start_ts, end_ts):
+        collected_windows.append((start_ts, end_ts))
+        return [str(raw1)]
+
+    _stub_sky_analysis_pipeline(monkeypatch, fake_collect)
+
+    app = _bare_app()
+    result = app.compute_sky_heatmap(6)  # more than the 2h actually buffered
+
+    assert "error" not in result
+    assert result["raw_files"] == 1
+    start_ts, end_ts = collected_windows[0]
+    assert start_ts == pytest.approx(now - 2 * 3600, abs=2), \
+        "must clip to the oldest buffered data, not fail or reach further back"
+    assert result["hours"] == pytest.approx(2, abs=0.1), \
+        "must report the window actually used, not the requested one"
 
 
 def test_compute_sky_heatmap_is_busy_while_already_running():

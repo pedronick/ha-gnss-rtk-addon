@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.30
+
+- Fixed: the skyplot page's cycle-slip heatmap failed outright ("no data
+  for the given window") if the raw log buffer held less than the
+  requested number of hours (e.g. right after startup) - `hours` is
+  meant as a maximum look-back, not a requirement, the same way
+  `button.start_ppp_campaign` already prefers whatever's buffered
+  instead of erroring out or waiting needlessly. Now clips to the oldest
+  buffered data instead, and the result's own `hours` reflects the
+  window actually used (e.g. "2.3h" when 6 were requested but only 2.3
+  were buffered), not the request.
+
+## 0.2.29
+
+- Fixed: `run_relay_receiver()`'s connection to str2str's internal relay
+  was reconnecting roughly every `RELAY_RETRY_INTERVAL_S` (2s)
+  indefinitely on a real installation, even though the connection itself
+  was healthy. `socket.create_connection(addr, timeout=X)` leaves that
+  timeout active on the *returned* socket, not just for the connect
+  attempt - so any pause in the actual data stream longer than 2 seconds
+  (entirely normal jitter, even at a steady 1Hz NMEA/RTCM rate) raised
+  `socket.timeout` on the next `recv()`, indistinguishable from a real
+  dead connection. Fixed with `conn.settimeout(None)` right after
+  connecting - a genuinely dead connection is still detected correctly
+  without it (a clean close still returns `b""`, a reset still raises
+  `OSError`). This is what was behind the file-descriptor leak fixed
+  below: rapid, needless reconnects are exactly what made it accumulate
+  fast enough to crash within hours instead of a very long time.
+
 ## 0.2.28
 
 - Fixed: 0.2.27 crashed outright on startup with
