@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.33
+
+- Quieted down the add-on's own logs: `convbin`/`rnx2rtkp` print their own
+  per-epoch progress to stderr with no newlines at all (meant to
+  overwrite the same line in an interactive terminal) - piped into the
+  add-on's logs unchanged, that turned into thousands of lines for a
+  multi-hour file (a real PPP campaign or sky heatmap run), burying
+  everything else. New `ppp._run_quiet()` captures it instead, and only
+  surfaces it (in a raised `RuntimeError`) if the tool actually exits
+  with a non-zero status - which doesn't cover every case (verified that
+  even the real "invalid option value" config bug from 0.2.25's
+  changelog exits 0; that one is - and remains - caught downstream by
+  `parse_last_position()`'s own "no valid epoch found" check, unrelated
+  to the exit code), but is a reasonable safety net for an actual tool
+  crash. New `debug` option (default off) is the escape hatch: set it to
+  get that output back live, e.g. to inspect a tool issue that doesn't
+  raise.
+
 ## 0.2.32
 
 - Fixed a related bug uncovered while verifying the previous release's

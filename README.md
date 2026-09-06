@@ -199,6 +199,13 @@ sets of configuration commands on the same port (RTCM3 + NMEA GGA/GST
 coexist fine on the same serial stream for `str2str`, which only extracts
 RTCM frames and ignores the rest).
 
+`debug: false` (default) suppresses `convbin`/`rnx2rtkp`'s own per-epoch
+progress output (meant to overwrite a single line in an interactive
+terminal, not to be logged) - without it, a real PPP campaign or sky
+heatmap run floods this add-on's log with thousands of lines. Set it to
+`true` to get that output back live in the log, e.g. to inspect a tool
+issue that isn't already surfaced as a clear error.
+
 ### Multiple NTRIP casters at the same time
 
 `ntrip_casters` is a list: from the add-on UI (Configuration tab) you can

@@ -2,6 +2,7 @@ import datetime as dt
 import gzip
 import os
 import re
+import subprocess
 
 import pytest
 
@@ -174,6 +175,45 @@ def test_gunzip_roundtrip(tmp_path):
     assert out.read_bytes() == b"test content"
 
 
+def test_run_quiet_suppresses_output_on_success_but_raises_with_it_on_failure(monkeypatch, capsys):
+    """convbin/rnx2rtkp print their own per-epoch progress to stderr with
+    no newlines at all (meant to overwrite the same terminal line) -
+    piped into the add-on's own logs unchanged, that turns into
+    thousands of lines for a multi-hour file. _run_quiet() captures it
+    instead of letting it reach the add-on's own stdout/stderr, but still
+    surfaces it (so a real failure - e.g. the "invalid option value"
+    config bug found this way in production - isn't silently harder to
+    diagnose)."""
+    def fake_run_ok(cmd, capture_output, text):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="lots of progress spam")
+
+    monkeypatch.setattr(ppp.subprocess, "run", fake_run_ok)
+    ppp._run_quiet(["some-tool"])
+    assert capsys.readouterr().out == "", "must not leak the tool's own output on success"
+
+    def fake_run_fail(cmd, capture_output, text):
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="invalid option value foo")
+
+    monkeypatch.setattr(ppp.subprocess, "run", fake_run_fail)
+    with pytest.raises(RuntimeError, match="invalid option value foo"):
+        ppp._run_quiet(["some-tool"])
+
+
+def test_run_quiet_lets_output_through_live_when_debug_is_set(monkeypatch):
+    """ppp.DEBUG (set by main.py from the "debug" add-on option) is the
+    escape hatch for the quieting in the test above - e.g. to inspect a
+    tool issue that doesn't raise (rnx2rtkp can exit 0 despite an
+    internal problem, see 0.2.33's changelog entry)."""
+    monkeypatch.setattr(ppp, "DEBUG", True)
+    calls = []
+    monkeypatch.setattr(ppp.subprocess, "run", lambda cmd, check: calls.append((cmd, check)))
+
+    ppp._run_quiet(["some-tool", "-x"])
+
+    assert calls == [(["some-tool", "-x"], True)], \
+        "must run with check=True and no output capturing, same as before _run_quiet existed"
+
+
 def test_parse_last_position_returns_last_valid_epoch(tmp_path):
     pos = tmp_path / "result.pos"
     pos.write_text(
@@ -300,7 +340,12 @@ def test_run_sky_analysis_invokes_rnx2rtkp_with_no_precise_products(monkeypatch,
     data - verified against a real installation's raw log that it still
     works with no SP3/CLK/ANTEX arguments at all, just obs+nav."""
     calls = []
-    monkeypatch.setattr(ppp.subprocess, "run", lambda cmd, check: calls.append(cmd))
+
+    def fake_run(cmd, capture_output, text):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ppp.subprocess, "run", fake_run)
 
     stat_path = ppp.run_sky_analysis("obs.o", "nav.n", tmp_path)
 

@@ -88,6 +88,10 @@ class App:
         self.caster_user = opts.get("caster_user", "")
         self.caster_password = opts.get("caster_password", "")
         self.caster_max_clients = opts.get("caster_max_clients", 10)
+        # See ppp._run_quiet(): off by default, convbin/rnx2rtkp's own
+        # per-epoch progress output is suppressed to keep this add-on's
+        # logs readable; set the "debug" option to get it back live.
+        ppp.DEBUG = opts.get("debug", False)
         # Always created (cheap, no listening socket yet): needed both for
         # the local NTRIP caster (caster_enabled) and, when rtcm_port ==
         # nmea_port, as the way monitor_nmea()/run_survey_in() read NMEA

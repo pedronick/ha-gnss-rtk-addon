@@ -1,5 +1,5 @@
 name: "RTK Base Station (Unicore/u-blox)"
-version: "0.2.32"
+version: "0.2.33"
 slug: "gnss_rtk_base"
 description: >-
   Reads a GNSS RTK receiver over serial (Unicore UM980/UM982 or u-blox
@@ -71,6 +71,12 @@ options:
   caster_user: ""
   caster_password: ""
   caster_max_clients: 10
+  # When false (default), convbin/rnx2rtkp's own per-epoch progress
+  # output (meant to overwrite a single terminal line, not to be logged)
+  # is suppressed - see ppp._run_quiet(). Set to true to get their full,
+  # unfiltered output back in this add-on's own log, e.g. to inspect a
+  # tool failure not already surfaced by a raised error.
+  debug: false
 schema:
   receiver_type: list(unicore_um98x|ublox_zedf9p)
   rtcm_port: str
@@ -89,3 +95,4 @@ schema:
   caster_user: str?
   caster_password: password?
   caster_max_clients: int(1,1000)
+  debug: bool

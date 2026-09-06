@@ -130,10 +130,36 @@ def concat_raw_files(paths, out_path):
                 shutil.copyfileobj(f, out)
 
 
+# Set by main.py from the add-on's "debug" option (default off). When
+# True, _run_quiet() lets convbin/rnx2rtkp's own output through live
+# instead of capturing/suppressing it - useful to inspect a tool issue
+# that doesn't raise (e.g. one that exits 0 despite an internal problem,
+# see 0.2.33's changelog entry).
+DEBUG = False
+
+
+def _run_quiet(cmd):
+    """Runs an RTKLIB console tool (convbin/rnx2rtkp) with its own
+    per-epoch progress spam suppressed, unless DEBUG is set. They print
+    it to stderr with no newlines at all (meant to overwrite the same
+    line via \\r in an interactive terminal) - piped into the add-on's
+    own logs instead, that turns into thousands of lines for a
+    multi-hour file. Raises RuntimeError with the tail of the captured
+    stderr (only surfaced on an actual failure) instead of
+    subprocess.CalledProcessError's own less informative default
+    message."""
+    if DEBUG:
+        subprocess.run(cmd, check=True)
+        return
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"{cmd[0]} failed (exit {result.returncode}): {result.stderr[-2000:]}")
+
+
 def convbin(raw_path, workdir):
     obs_path = f"{workdir}/campaign.obs"
     nav_path = f"{workdir}/campaign.nav"
-    subprocess.run(["convbin", raw_path, "-r", "rtcm3", "-o", obs_path, "-n", nav_path], check=True)
+    _run_quiet(["convbin", raw_path, "-r", "rtcm3", "-o", obs_path, "-n", nav_path])
     return obs_path, nav_path
 
 
@@ -248,7 +274,7 @@ def run_rnx2rtkp(obs_path, nav_path, sp3_paths, clk_paths, atx_path, workdir):
     out_pos = workdir / "result.pos"
     cmd = ["rnx2rtkp", "-k", str(conf_path), "-o", str(out_pos), str(obs_path), str(nav_path)]
     cmd += [str(p) for p in sp3_paths] + [str(p) for p in clk_paths] + [str(atx_path)]
-    subprocess.run(cmd, check=True)
+    _run_quiet(cmd)
     return out_pos
 
 
@@ -317,8 +343,8 @@ def run_sky_analysis(obs_path, nav_path, workdir):
     conf_path = workdir / "sky.conf"
     conf_path.write_text(SKY_ANALYSIS_CONF)
     out_pos = workdir / "sky.pos"
-    subprocess.run(["rnx2rtkp", "-k", str(conf_path), "-y", "2", "-o", str(out_pos),
-                    str(obs_path), str(nav_path)], check=True)
+    _run_quiet(["rnx2rtkp", "-k", str(conf_path), "-y", "2", "-o", str(out_pos),
+                str(obs_path), str(nav_path)])
     return workdir / "sky.pos.stat"
 
 
