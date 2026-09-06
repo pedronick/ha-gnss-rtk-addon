@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.32
+
+- Fixed a related bug uncovered while verifying the previous release's
+  fix on a real installation: `_oldest_raw_log_ts()` (behind
+  `sensor.raw_log_buffer_hours`, `button.start_ppp_campaign`'s buffer
+  preference, and the sky heatmap's clipping) used each raw log file's
+  *mtime* to decide how far back the buffer reaches - but a file
+  currently being actively written to always has an mtime of ~"now",
+  regardless of how long ago it was opened. Even with 0.2.31's `::S=1`
+  rotation fix correctly landed, this made `raw_log_buffer_hours` keep
+  reading ~0 on a real installation, no matter how much data had
+  actually accumulated: the *current* hour's file is, by definition,
+  still being written to. Fixed by using each file's *filename-encoded*
+  start hour instead (see new `ppp.raw_file_start_ts()`, also now shared
+  with `collect_raw_files()`) - mtime remains the right choice for
+  `cleanup_raw_logs()`'s own retention pruning (there, "hasn't been
+  touched in a while" is exactly the right question), just not for "how
+  far back does the buffer reach".
+
 ## 0.2.31
 
 - Fixed a real, fairly fundamental bug: the continuous raw log was never

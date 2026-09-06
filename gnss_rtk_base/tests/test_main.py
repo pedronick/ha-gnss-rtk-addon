@@ -29,6 +29,20 @@ class FakeMqtt:
         pass
 
 
+def _gnssbase_filename(ts):
+    """A gnssbase_YYYYMMDDHH.rtcm3 name encoding the UTC hour containing
+    ts - _oldest_raw_log_ts() parses this (see ppp.raw_file_start_ts),
+    not a file's mtime (which, for a file str2str is still actively
+    writing to, is always ~"now" regardless of how long ago it was
+    opened - found from a real installation where this made
+    raw_log_buffer_hours read ~0 no matter how much data had actually
+    accumulated). Tests that need a raw log file of a specific simulated
+    age must encode that age in the filename itself, not just via
+    os.utime()."""
+    d = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
+    return f"gnssbase_{d:%Y%m%d%H}.rtcm3"
+
+
 def _bare_app(**overrides):
     """Builds an App instance bypassing __init__ (which would open a real
     MQTT connection), setting only the attributes needed for pure-logic
@@ -909,12 +923,10 @@ def test_run_ppp_campaign_uses_oldest_buffered_data_without_relogging_when_buffe
     monkeypatch.setattr(position_backup, "DEFAULT_PATH", tmp_path / "backup.json")
 
     now = time.time()
-    oldest_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
-    oldest_file.write_bytes(b"old data")
-    os.utime(oldest_file, (now - 40 * 3600, now - 40 * 3600))  # 40h old: within a 72h buffer
-    newest_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011623.rtcm3"
-    newest_file.write_bytes(b"new data")
-    os.utime(newest_file, (now - 1, now - 1))  # essentially "now"
+    oldest_file = Path(main.RAW_LOG_DIR) / _gnssbase_filename(now - 40 * 3600)
+    oldest_file.write_bytes(b"old data")  # 40h old (by filename): within a 72h buffer
+    newest_file = Path(main.RAW_LOG_DIR) / _gnssbase_filename(now)
+    newest_file.write_bytes(b"new data")  # essentially "now"
 
     collected_windows = []
 
@@ -940,7 +952,7 @@ def test_run_ppp_campaign_uses_oldest_buffered_data_without_relogging_when_buffe
 
     assert len(collected_windows) == 1
     start_ts, end_ts = collected_windows[0]
-    assert start_ts == pytest.approx(now - 40 * 3600, abs=2), \
+    assert start_ts == pytest.approx(now - 40 * 3600, abs=3600), \
         "must start from the oldest file's timestamp, not from raw_log_retention_hours ago"
     assert (end_ts - start_ts) / 3600 == pytest.approx(6, rel=0.01), \
         "window must span ppp_duration_hours, not the whole buffer"
@@ -954,15 +966,19 @@ def test_run_ppp_campaign_only_waits_for_the_missing_portion_when_buffer_is_part
     """If the buffer holds *some* but not enough data yet (here: ~2s
     "old" out of a 4s campaign), the existing buffered data must count as
     a head start - only the missing ~2s should require waiting, not the
-    full 4s from scratch."""
+    full 4s from scratch.
+
+    _oldest_raw_log_ts() is mocked directly here, rather than relying on
+    a real file's filename (as other tests in this group do): that
+    filename only has hour-granularity (see ppp.raw_file_start_ts), far
+    too coarse for this test's deliberately sub-second timings, which
+    exist purely to keep the test itself fast."""
     monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     Path(main.RAW_LOG_DIR).mkdir(parents=True)
     now = time.time()
-    oldest_file = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
-    oldest_file.write_bytes(b"old data")
-    os.utime(oldest_file, (now - 2, now - 2))  # 2s "old": a partial head start
 
     app = _bare_app(ppp_duration_hours=4 / 3600, raw_log_retention_hours=72)  # 4s campaign
+    monkeypatch.setattr(app, "_oldest_raw_log_ts", lambda: now - 2)  # 2s "old": a partial head start
 
     t = threading.Thread(target=app.run_ppp_campaign, daemon=True)
     t.start()
@@ -999,6 +1015,26 @@ def test_run_ppp_campaign_falls_back_to_fresh_logging_when_buffer_is_empty(monke
     states = [p for k, p in app.mqtt.published if k.endswith("ppp_status/state")]
     assert "error" not in states
     assert states[-1] == "done"
+
+
+def test_oldest_raw_log_ts_uses_filename_not_mtime_for_an_actively_written_file(monkeypatch, tmp_path):
+    """Regression: a file str2str is still actively writing to has an
+    mtime that's always ~"now", regardless of how long ago it was
+    opened (str2str only rotates hourly if its output path has an
+    explicit "::S=1" swap option, see build_str2str_cmd()) - using mtime
+    here made raw_log_buffer_hours read ~0 no matter how much data had
+    actually accumulated, on a real installation where a file named for
+    hour 11 was still being written to well past hour 13."""
+    monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path))
+    now = time.time()
+    old_named_file = tmp_path / _gnssbase_filename(now - 5 * 3600)
+    old_named_file.write_bytes(b"data")
+    os.utime(old_named_file, (now, now))  # still being actively written to right now
+
+    app = _bare_app()
+    oldest_ts = app._oldest_raw_log_ts()
+
+    assert oldest_ts == pytest.approx(now - 5 * 3600, abs=3600)
 
 
 def test_clear_raw_log_buffer_removes_files_and_resets_buffer_hours(monkeypatch, tmp_path):
@@ -1053,9 +1089,8 @@ def test_compute_sky_heatmap_returns_slip_events_for_the_requested_window(monkey
     monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     Path(main.RAW_LOG_DIR).mkdir(parents=True)
     now = time.time()
-    raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
-    raw1.write_bytes(b"data")
-    os.utime(raw1, (now - 40 * 3600, now - 40 * 3600))  # buffer deeper than the requested 6h
+    raw1 = Path(main.RAW_LOG_DIR) / _gnssbase_filename(now - 40 * 3600)
+    raw1.write_bytes(b"data")  # buffer deeper (40h) than the requested 6h
 
     collected_windows = []
 
@@ -1084,13 +1119,17 @@ def test_compute_sky_heatmap_uses_whatever_is_buffered_when_shallower_than_reque
     the given window" instead of just showing what's there - `hours` is
     meant as a maximum look-back, not a requirement, the same way
     run_ppp_campaign() already prefers whatever's buffered over erroring
-    out or waiting needlessly."""
+    out or waiting needlessly.
+
+    _oldest_raw_log_ts() is mocked directly here rather than relying on a
+    real file's filename: that filename only has hour-granularity (see
+    ppp.raw_file_start_ts), too coarse for this test's precise "exactly
+    2h buffered" check."""
     monkeypatch.setattr(main, "RAW_LOG_DIR", str(tmp_path / "raw_logs"))
     Path(main.RAW_LOG_DIR).mkdir(parents=True)
     now = time.time()
     raw1 = Path(main.RAW_LOG_DIR) / "gnssbase_2024011500.rtcm3"
     raw1.write_bytes(b"data")
-    os.utime(raw1, (now - 2 * 3600, now - 2 * 3600))  # only 2h buffered
 
     collected_windows = []
 
@@ -1101,6 +1140,7 @@ def test_compute_sky_heatmap_uses_whatever_is_buffered_when_shallower_than_reque
     _stub_sky_analysis_pipeline(monkeypatch, fake_collect)
 
     app = _bare_app()
+    monkeypatch.setattr(app, "_oldest_raw_log_ts", lambda: now - 2 * 3600)  # only 2h buffered
     result = app.compute_sky_heatmap(6)  # more than the 2h actually buffered
 
     assert "error" not in result

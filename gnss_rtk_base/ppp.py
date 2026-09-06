@@ -72,6 +72,26 @@ def gps_week_dow(date):
     return delta_days // 7, delta_days % 7
 
 
+RAW_LOG_FILENAME_RE = re.compile(r"gnssbase_(\d{4})(\d{2})(\d{2})(\d{2})\.rtcm3$")
+
+
+def raw_file_start_ts(path):
+    """The UTC timestamp encoded in a gnssbase_YYYYMMDDHH.rtcm3 raw log
+    filename - the hour str2str opened it in, which is what matters for
+    "how far back does the buffer reach" (see main.py's
+    _oldest_raw_log_ts()). Deliberately not the file's mtime: for a file
+    still being actively written to, mtime is always ~"now" regardless
+    of how long ago it was opened, which would make a buffer of any real
+    depth read as ~0 - found from a real installation where this hid a
+    genuinely deep buffer entirely. Returns None if the filename doesn't
+    match the expected pattern."""
+    m = RAW_LOG_FILENAME_RE.search(path)
+    if not m:
+        return None
+    y, mo, d, h = (int(x) for x in m.groups())
+    return dt.datetime(y, mo, d, h, tzinfo=dt.timezone.utc).timestamp()
+
+
 def collect_raw_files(raw_log_dir, start_ts, end_ts):
     """Selects the gnssbase_YYYYMMDDHH.rtcm3 files that could contain data
     overlapping [start_ts, end_ts], with a one-hour margin on both sides
@@ -88,15 +108,12 @@ def collect_raw_files(raw_log_dir, start_ts, end_ts):
     file named for hour 11 was still being written to well past hour 13:
     matching by name alone made every raw-log window (of any size) miss
     it entirely once "now" drifted far enough past that one hour."""
-    pattern = re.compile(r"gnssbase_(\d{4})(\d{2})(\d{2})(\d{2})\.rtcm3$")
     margin = 3600
     selected = []
     for path in sorted(glob.glob(f"{raw_log_dir}/gnssbase_*.rtcm3")):
-        m = pattern.search(path)
-        if not m:
+        file_start_ts = raw_file_start_ts(path)
+        if file_start_ts is None:
             continue
-        y, mo, d, h = (int(x) for x in m.groups())
-        file_start_ts = dt.datetime(y, mo, d, h, tzinfo=dt.timezone.utc).timestamp()
         try:
             file_end_ts = max(file_start_ts, os.path.getmtime(path))
         except OSError:

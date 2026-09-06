@@ -355,15 +355,19 @@ class App:
             time.sleep(3600)
 
     def _oldest_raw_log_ts(self):
-        """mtime of the oldest currently-retained raw log file, or None if
-        the buffer is empty (e.g. right after startup, or after
-        clear_raw_log_buffer())."""
+        """Start timestamp (from the filename, see ppp.raw_file_start_ts)
+        of the oldest currently-retained raw log file, or None if the
+        buffer is empty (e.g. right after startup, or after
+        clear_raw_log_buffer()). Deliberately not each file's mtime: a
+        file str2str is still actively writing to always has mtime ~"now"
+        regardless of how long ago it was opened, which would make a
+        buffer of any real depth read as ~0 hours - found from a real
+        installation where this hid a genuinely deep buffer entirely."""
         timestamps = []
         for path in glob.glob(f"{RAW_LOG_DIR}/gnssbase_*.rtcm3"):
-            try:
-                timestamps.append(os.path.getmtime(path))
-            except OSError:
-                pass
+            ts = ppp.raw_file_start_ts(path)
+            if ts is not None:
+                timestamps.append(ts)
         return min(timestamps) if timestamps else None
 
     def _publish_raw_log_buffer_hours(self):
