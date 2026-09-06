@@ -51,7 +51,7 @@ RUN git clone --depth 1 --branch "$RTKLIB_REF" https://github.com/tomojitakasu/R
     && rm -rf /tmp/RTKLIB
 
 WORKDIR /app
-COPY main.py nmea.py mqtt_discovery.py ppp.py state.py webui.py caster.py position_backup.py /app/
+COPY main.py nmea.py mqtt_discovery.py mqtt_shadow.py ppp.py state.py webui.py caster.py position_backup.py /app/
 COPY drivers /app/drivers
 COPY www /app/www
 COPY run.sh /

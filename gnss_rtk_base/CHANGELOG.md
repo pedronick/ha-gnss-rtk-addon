@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.28
+
+- Fixed: 0.2.27 crashed outright on startup with
+  `ModuleNotFoundError: No module named 'mqtt_shadow'`. The Dockerfile
+  copies top-level modules into the image via an explicit file list
+  (not the whole directory) and `mqtt_shadow.py` (added in 0.2.27) was
+  missing from it - present in the repo, imported by main.py, covered by
+  its own tests, but never actually shipped in the built image. Added
+  `test_dockerfile_copies_every_top_level_python_module` so this class of
+  mistake fails the test suite instead of only surfacing after a real
+  deploy.
+
 ## 0.2.27
 
 - Fixed a real file-descriptor-exhaustion crash: `_relay_line_reader()`
