@@ -12,8 +12,6 @@
   window actually used (e.g. "2.3h" when 6 were requested but only 2.3
   were buffered), not the request.
 
-## 0.2.29
-
 - Fixed: `run_relay_receiver()`'s connection to str2str's internal relay
   was reconnecting roughly every `RELAY_RETRY_INTERVAL_S` (2s)
   indefinitely on a real installation, even though the connection itself
