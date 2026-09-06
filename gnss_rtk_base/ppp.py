@@ -9,6 +9,7 @@ rnx2rtkp in PPP-static mode to get the absolute position of the base.
 import datetime as dt
 import glob
 import gzip
+import os
 import re
 import shutil
 import subprocess
@@ -72,9 +73,21 @@ def gps_week_dow(date):
 
 
 def collect_raw_files(raw_log_dir, start_ts, end_ts):
-    """Selects the gnssbase_YYYYMMDDHH.rtcm3 files that cover
-    [start_ts, end_ts], with a one-hour margin on both sides to avoid
-    edge cutoffs."""
+    """Selects the gnssbase_YYYYMMDDHH.rtcm3 files that could contain data
+    overlapping [start_ts, end_ts], with a one-hour margin on both sides
+    to avoid edge cutoffs.
+
+    A file's own coverage window is [filename hour, mtime] - not just
+    the filename's hour - since str2str's raw log is only guaranteed to
+    rotate hourly when its output path has an explicit "::S=1" swap
+    option (see main.py's build_str2str_cmd()); without it (or if an
+    older file predating that fix is still lying around), str2str just
+    keeps appending to the same file indefinitely, so its *name* reflects
+    only the hour it happened to be created in while its *content* (and
+    mtime) can reach much further. Found from a real installation where a
+    file named for hour 11 was still being written to well past hour 13:
+    matching by name alone made every raw-log window (of any size) miss
+    it entirely once "now" drifted far enough past that one hour."""
     pattern = re.compile(r"gnssbase_(\d{4})(\d{2})(\d{2})(\d{2})\.rtcm3$")
     margin = 3600
     selected = []
@@ -83,8 +96,12 @@ def collect_raw_files(raw_log_dir, start_ts, end_ts):
         if not m:
             continue
         y, mo, d, h = (int(x) for x in m.groups())
-        file_ts = dt.datetime(y, mo, d, h, tzinfo=dt.timezone.utc).timestamp()
-        if start_ts - margin <= file_ts <= end_ts + margin:
+        file_start_ts = dt.datetime(y, mo, d, h, tzinfo=dt.timezone.utc).timestamp()
+        try:
+            file_end_ts = max(file_start_ts, os.path.getmtime(path))
+        except OSError:
+            continue
+        if file_end_ts + margin >= start_ts and file_start_ts - margin <= end_ts:
             selected.append(path)
     return selected
 

@@ -245,10 +245,25 @@ class App:
             out = (f"ntrips://:{caster_cfg.get('password', '')}"
                    f"@{caster_cfg['host']}:{caster_cfg['port']}/{caster_cfg.get('mountpoint', '')}")
             cmd += ["-out", out]
-        # Continuous raw log, with automatic hourly rotation (str2str
-        # recognizes the %Y%m%d%h tags in the path and creates a new file
-        # every hour).
-        cmd += ["-out", f"file://{RAW_LOG_DIR}/gnssbase_%Y%m%d%h.rtcm3"]
+        # Continuous raw log, with hourly rotation - "::S=1" (RTKLIB's
+        # file swap-interval option, hours) is required for that, found
+        # the hard way on a real installation: the %Y%m%d%h tags in the
+        # path are only evaluated once, when str2str first opens the
+        # file (see src/stream.c's openfile_()/reppath()) - without
+        # ::S=1, str2str just keeps appending to that same file forever,
+        # regardless of how many real hours pass, so its name reflects
+        # only the hour str2str happened to start in while its content
+        # (and mtime) keeps growing far past it. That silently broke
+        # every raw-log consumer that assumes small, genuinely
+        # hourly-bounded files: collect_raw_files() (matches by the
+        # filename's hour, missing a long-lived file once "now" drifts
+        # far enough past it), cleanup_raw_logs()'s retention (an
+        # ever-growing file's mtime is always "now", so it never ages out
+        # and never shrinks), and raw_log_buffer_hours (computed from the
+        # oldest file's mtime, which - being the same ever-growing file -
+        # is always ~0 instead of reflecting how far back its actual
+        # content reaches).
+        cmd += ["-out", f"file://{RAW_LOG_DIR}/gnssbase_%Y%m%d%h.rtcm3::S=1"]
         if self.needs_internal_relay():
             # str2str listens as a TCP server and caster.py's
             # run_relay_receiver() connects to it as a client (backwards

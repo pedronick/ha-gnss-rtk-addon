@@ -119,6 +119,25 @@ def test_build_str2str_cmd_without_any_caster_configured():
     assert outs[0].startswith("file://")
 
 
+def test_build_str2str_cmd_raw_log_has_hourly_swap_option():
+    """Regression: the %Y%m%d%h tags in the raw log path are only
+    evaluated once, when str2str first opens the file (RTKLIB's
+    src/stream.c openfile_()/reppath()) - without an explicit "::S=1"
+    swap-interval suffix, str2str just keeps appending to that same file
+    forever, regardless of how many real hours pass. Found from a real
+    installation: a single file's name said hour 11 but its mtime showed
+    over 2 hours later, silently breaking collect_raw_files() (matches
+    by the filename's hour), raw_log_buffer_hours (derived from the
+    oldest file's mtime, always ~0 for an ever-growing single file), and
+    cleanup_raw_logs()'s retention (an always-fresh mtime never ages
+    out)."""
+    app = _bare_app(nmea_port="/dev/null-fake-nmea", ntrip_casters=[])
+    cmd = app.build_str2str_cmd()
+    outs = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "-out"]
+    log_out = next(o for o in outs if o.startswith("file://"))
+    assert log_out.endswith("::S=1")
+
+
 @pytest.mark.parametrize("port", ["/dev/ttyUSB0", "/dev/ttyACM0"])
 def test_build_str2str_cmd_strips_dev_prefix_from_serial_port(port):
     """str2str prepends '/dev/' to the device name itself (openserial()

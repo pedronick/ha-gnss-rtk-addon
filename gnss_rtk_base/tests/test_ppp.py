@@ -1,5 +1,6 @@
 import datetime as dt
 import gzip
+import os
 import re
 
 import pytest
@@ -96,6 +97,41 @@ def test_collect_raw_files_filters_by_time_window(tmp_path):
     # With the one-hour margin, hours 00-04 are expected (01-1h .. 03+1h).
     hours = sorted(int(re.search(r"gnssbase_\d{8}(\d{2})\.rtcm3$", p).group(1)) for p in selected)
     assert hours == [0, 1, 2, 3, 4]
+
+
+def test_collect_raw_files_uses_mtime_for_a_long_lived_file(tmp_path):
+    """Regression: str2str only rotates the raw log hourly if its output
+    path has an explicit "::S=1" swap option (see main.py's
+    build_str2str_cmd()) - without it, str2str keeps appending to the
+    same file indefinitely, so its *name* reflects only the hour it was
+    first opened while its *content* (and mtime) can reach much further.
+    Found from a real installation: a file named for hour 11 was still
+    being written to over 2 hours later, and every window (of any size)
+    missed it entirely once "now" drifted far enough past that one
+    hour - matching by filename alone isn't enough."""
+    old_named_file = tmp_path / "gnssbase_2024011500.rtcm3"
+    old_named_file.write_bytes(b"x")
+    still_being_written_at = dt.datetime(2024, 1, 15, 3, tzinfo=dt.timezone.utc).timestamp()
+    os.utime(old_named_file, (still_being_written_at, still_being_written_at))
+
+    start = dt.datetime(2024, 1, 15, 2, 30, tzinfo=dt.timezone.utc).timestamp()
+    end = dt.datetime(2024, 1, 15, 3, tzinfo=dt.timezone.utc).timestamp()
+    selected = ppp.collect_raw_files(str(tmp_path), start, end)
+
+    assert selected == [str(old_named_file)]
+
+
+def test_collect_raw_files_excludes_a_genuinely_old_untouched_file(tmp_path):
+    old_file = tmp_path / "gnssbase_2024011000.rtcm3"
+    old_file.write_bytes(b"x")
+    old_ts = dt.datetime(2024, 1, 10, 0, tzinfo=dt.timezone.utc).timestamp()
+    os.utime(old_file, (old_ts, old_ts))
+
+    start = dt.datetime(2024, 1, 15, 0, tzinfo=dt.timezone.utc).timestamp()
+    end = dt.datetime(2024, 1, 15, 6, tzinfo=dt.timezone.utc).timestamp()
+    selected = ppp.collect_raw_files(str(tmp_path), start, end)
+
+    assert selected == []
 
 
 def test_concat_raw_files(tmp_path):

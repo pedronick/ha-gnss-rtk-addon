@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.31
+
+- Fixed a real, fairly fundamental bug: the continuous raw log was never
+  actually rotating hourly, despite the `%Y%m%d%h` tags in its output
+  path (and this project's own long-standing assumption/comment saying
+  otherwise). RTKLIB only evaluates those tags once, when str2str first
+  opens the file - actual periodic rotation while running requires an
+  explicit `::S=<hours>` swap-interval suffix on the path, which was
+  missing. Without it, str2str just kept appending to the same file
+  indefinitely: found on a real installation where a file named for hour
+  11 was still being written to over two hours later. This silently
+  broke everything that assumed small, genuinely hourly-bounded files:
+  - `sensor.raw_log_buffer_hours` always read ~0 (computed from the
+    oldest file's mtime, which - being the same ever-growing file - is
+    always ~"now").
+  - The sky heatmap failed with "no raw log file found" for *any*
+    requested window, once "now" drifted far enough past the one hour
+    baked into that file's name.
+  - Raw log retention (`cleanup_raw_logs`) couldn't age the file out
+    (an always-fresh mtime never crosses the threshold), so it would
+    have grown without bound instead of rotating into prunable pieces.
+  - `run_ppp_campaign()`'s window could still miss the file the same way
+    once enough time had passed since it was opened.
+  Fixed with `::S=1` on the raw log's output path. As defense in depth,
+  `ppp.collect_raw_files()` now also matches by each file's actual
+  `[filename hour, mtime]` coverage instead of the filename alone, so an
+  old, already-long-lived file (e.g. one still around from before this
+  fix, until it naturally ages out) doesn't silently disappear from
+  every consumer again.
+
 ## 0.2.30
 
 - Fixed: the skyplot page's cycle-slip heatmap failed outright ("no data
