@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.35
+
+- Fixed the actual remaining reason every real PPP campaign produced zero
+  valid epochs, even with the 0.2.34 broadcast-vs-precise ephemeris fix
+  applied: RTKLIB's default GPS code priority for the second frequency
+  (`codepris` in `src/rtkcmn.c`) ranks the legacy P(Y) ("W") signal above
+  L2C ("X"), and for RINEX 3 files that choice is made once per file
+  (`set_index()` in `src/rinex.c`) with no per-epoch fallback if the
+  chosen code turns out blank that epoch. Checked a real UM982 RINEX
+  export directly: `C2W`/`L2W` are populated in only ~2% of GPS
+  observation lines (the receiver tracks L2C almost exclusively) while
+  `C2X`/`L2X` are populated in ~98%. RTKLIB kept selecting the
+  near-always-blank W code, so the ionosphere-free phase/code
+  combinations (`Lc`/`Pc`) came out 0 for nearly every epoch - logged by
+  `ppp.c` as "no valid obs data". Added `misc-rnxopt1=-GL2X` to force
+  RTKLIB to prefer L2C instead. Verified by re-running `rnx2rtkp` on the
+  two real failed-campaign windows a user exported from their own
+  instance: both went from 0 valid epochs to over 99% valid epochs, with
+  the solution converging to sub-centimeter sigma by the end of each
+  window - the first real, successful PPP-static fixes this project has
+  produced from field data. Also applied to the standalone
+  `ppp_process.py` script.
+
 ## 0.2.34
 
 - Fixed a significant bug: every PPP campaign this project ever ran was

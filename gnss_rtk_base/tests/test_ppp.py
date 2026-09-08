@@ -40,6 +40,24 @@ def test_ppp_conf_template_explicitly_requests_precise_ephemeris():
     assert "pos1-sateph        =precise" in ppp.PPP_CONF_TEMPLATE
 
 
+def test_ppp_conf_template_prefers_l2c_over_legacy_py_code_for_gps():
+    """Regression: RTKLIB's default GPS code priority for the second
+    frequency (codepris["PYWCMNDLSX"] in src/rtkcmn.c) ranks the legacy
+    P(Y) ("W") signal above L2C ("X"). For RINEX 3 obs files this choice
+    is made once per file (set_index() in src/rinex.c), with no per-epoch
+    fallback if the chosen code turns out blank that epoch. A real UM982
+    RINEX export was checked directly: C2W/L2W are populated in only
+    ~2% of GPS observation lines (the receiver tracks L2C almost
+    exclusively) while C2X/L2X are populated in ~98%. Without this
+    override, RTKLIB kept selecting the near-always-blank W code, so Lc/Pc
+    came out 0 for nearly every epoch and every real PPP campaign produced
+    "no valid obs data" and zero valid epochs - even after the pos1-sateph
+    fix above. Verified by re-running rnx2rtkp on two real failed-campaign
+    exports with misc-rnxopt1=-GL2X added: both went from 0 valid epochs
+    to >99% valid epochs, converging to sub-cm sigma."""
+    assert "misc-rnxopt1       =-GL2X" in ppp.PPP_CONF_TEMPLATE
+
+
 def test_gps_week_dow_epoch_and_known_reference():
     # By definition, the GPS epoch itself is week 0, day 0.
     assert ppp.gps_week_dow(ppp.GPS_EPOCH) == (0, 0)

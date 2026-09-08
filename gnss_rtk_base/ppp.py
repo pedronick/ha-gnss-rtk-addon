@@ -34,6 +34,17 @@ ANTEX_MIRRORS = [
     "https://cddis.nasa.gov/archive/gnss/data/daily/misc/igs20.atx",
 ]
 
+# misc-rnxopt1=-GL2X: forces RTKLIB to use the L2C ("X") signal for GPS'
+# second frequency instead of its default preference for the legacy P(Y)
+# ("W") signal. Confirmed against real UM982 RINEX output that C2W/L2W are
+# populated in only ~2% of epochs (the receiver tracks L2C almost
+# exclusively) while C2X/L2X are populated in ~98% - without this override
+# RTKLIB silently discards nearly every epoch's second-frequency data
+# (Lc/Pc end up 0, ppp.c logs "no valid obs data"), which was the actual
+# reason every real PPP campaign produced zero valid epochs even after the
+# pos1-sateph fix below. Verified with two real failed campaign exports:
+# both went from 0 valid epochs to >99% valid epochs with this option, the
+# solution converging to sub-cm sigma by the end of each window.
 PPP_CONF_TEMPLATE = """\
 pos1-posmode       =ppp-static
 pos1-frequency     =l1+2
@@ -45,6 +56,7 @@ pos1-dynamics      =off
 pos1-tidecorr      =off
 pos1-sateph        =precise
 pos1-niter         =1
+misc-rnxopt1       =-GL2X
 pos2-armode        =off
 pos2-gloarmode     =off
 out-solformat      =llh
