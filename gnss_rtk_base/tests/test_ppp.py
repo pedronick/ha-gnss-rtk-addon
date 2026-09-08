@@ -26,6 +26,20 @@ def test_ppp_conf_template_uses_valid_rtklib_option_values():
     assert "=iflc" not in ppp.PPP_CONF_TEMPLATE
 
 
+def test_ppp_conf_template_explicitly_requests_precise_ephemeris():
+    """Regression: RTKLIB's compiled-in default for pos1-sateph is 0
+    (broadcast ephemeris) - see prcopt_default in src/rtkcmn.c - and
+    PPP_CONF_TEMPLATE never overrode it. Every PPP campaign this project
+    ever ran was therefore silently using only the broadcast ephemeris
+    (from the RINEX nav file), never the SP3/CLK precise products it
+    went through the trouble of downloading and passing on the
+    rnx2rtkp command line - confirmed by a real result.pos header
+    reading "% ephemeris : Broadcast" despite real SP3/CLK files being
+    supplied. Found while investigating a real "no valid epoch found"
+    campaign failure."""
+    assert "pos1-sateph        =precise" in ppp.PPP_CONF_TEMPLATE
+
+
 def test_gps_week_dow_epoch_and_known_reference():
     # By definition, the GPS epoch itself is week 0, day 0.
     assert ppp.gps_week_dow(ppp.GPS_EPOCH) == (0, 0)

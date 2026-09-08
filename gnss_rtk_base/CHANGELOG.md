@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.34
+
+- Fixed a significant bug: every PPP campaign this project ever ran was
+  silently using only broadcast ephemeris, never the SP3/CLK precise
+  products it downloads and passes to `rnx2rtkp` on the command line.
+  RTKLIB's compiled-in default for `pos1-sateph` is 0 ("broadcast",
+  `prcopt_default` in `src/rtkcmn.c`) and `PPP_CONF_TEMPLATE` never
+  overrode it - confirmed by a real failed campaign's `result.pos`
+  header reading `% ephemeris : Broadcast` despite real, correctly
+  date-matched SP3/CLK files being supplied. Added `pos1-sateph
+  =precise`; a real re-run with the fix now reads `% ephemeris :
+  Precise` as expected. (The specific failed window used to verify this
+  still doesn't produce a fix - real data from before the 0.2.31 hourly
+  rotation fix, with its own separate, chronic phase-slip instability -
+  but the underlying broadcast-vs-precise bug is real and independent of
+  that.) Also applied to the standalone `ppp_process.py` script for
+  consistency, per this project's own convention.
+- Fixed a duplicate/nonsensical log line: `_archive_failed_ppp_window()`
+  had leftover copy-paste residue printing a second, wrongly-worded
+  archive message with a meaningless fraction (e.g. "archived 7/3 raw
+  log file(s)").
+- Fixed a `BrokenPipeError` traceback in the add-on's own log: a client
+  giving up on a slow `/api/sky_heatmap` call (its own shorter timeout,
+  or a browser tab closed/navigated away) before the add-on finished
+  computing used to dump a full traceback - harmless (the server keeps
+  running) but noisy. `webui.py`'s `_send_json()` now lets that
+  particular case end quietly.
+
 ## 0.2.33
 
 - Quieted down the add-on's own logs: `convbin`/`rnx2rtkp` print their own

@@ -43,6 +43,7 @@ pos1-ionoopt       =dual-freq
 pos1-tropopt       =est-ztd
 pos1-dynamics      =off
 pos1-tidecorr      =off
+pos1-sateph        =precise
 pos1-niter         =1
 pos2-armode        =off
 pos2-gloarmode     =off

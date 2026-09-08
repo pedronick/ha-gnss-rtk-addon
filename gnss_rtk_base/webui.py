@@ -70,11 +70,20 @@ def make_handler(state, fix_label_fn, sky_heatmap_fn, mqtt_state_fn, command_fn)
 
         def _send_json(self, obj, status=200):
             payload = json.dumps(obj).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except (BrokenPipeError, ConnectionResetError):
+                # The client gave up before a slow /api/sky_heatmap call
+                # finished (e.g. a browser tab closed/navigated away, or -
+                # found this way - a diagnostic tool with its own shorter
+                # timeout than a large "hours" window actually takes) -
+                # nothing left to do but let this request end quietly
+                # instead of a full traceback in the add-on's own log.
+                pass
 
         def _serve_file(self, filepath):
             if not filepath.exists():

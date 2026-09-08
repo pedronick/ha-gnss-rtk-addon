@@ -1194,8 +1194,6 @@ class App:
                 print(f"[ppp] warning: could not archive {src}: {e}", flush=True)
         print(f"[ppp] archived {archived} file(s) from the failed window to {archive_dir} "
               "for inspection (e.g. via the Samba \"share\" folder)", flush=True)
-        print(f"[ppp] archived {archived}/{len(raw_files)} raw log file(s) "
-              f"used for this position to {archive_dir}", flush=True)
 
     def retry_ppp_computation(self):
         """Retries just the final computation step (see
